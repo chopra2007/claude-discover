@@ -1,0 +1,22 @@
+{
+  "name": "discover",
+  "version": "0.1.0",
+  "description": "Methodical 5-pass workflow for adding new features to existing software or automation systems with high success rate and zero redundancy. Composes OMC and superpowers skills via tmux multi-agent orchestration.",
+  "author": {
+    "name": "chopra2007"
+  },
+  "homepage": "https://github.com/chopra2007/claude-discover",
+  "repository": "https://github.com/chopra2007/claude-discover",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "feature-development",
+    "multi-agent",
+    "tmux",
+    "orchestration",
+    "automation",
+    "ralplan",
+    "ccg",
+    "discovery"
+  ]
+}

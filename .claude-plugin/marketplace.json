@@ -1,0 +1,27 @@
+{
+  "name": "discover",
+  "owner": {
+    "name": "chopra2007"
+  },
+  "metadata": {
+    "description": "Marketplace for the discover plugin — methodical 5-pass feature discovery and execution workflow for Claude Code.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "discover",
+      "source": ".",
+      "description": "Methodical 5-pass workflow for adding new features to existing software or automation systems. Triggers on /discover, discover:, or the phrase 'discover skill'. Orchestrates Pass 0 (system analysis), Pass 1 (external research), Pass 2 (filter/prioritize), Pass 3 (adversarial + ccg cross-model synthesis), Pass 4 (ralplan implementation plan), Pass 5 (autonomous execution + verification + git push).",
+      "version": "0.1.0",
+      "category": "workflow",
+      "keywords": [
+        "workflow",
+        "feature-development",
+        "multi-agent",
+        "tmux",
+        "discovery"
+      ],
+      "homepage": "https://github.com/chopra2007/claude-discover"
+    }
+  ]
+}

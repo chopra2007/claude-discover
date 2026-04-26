@@ -1,0 +1,9 @@
+# Run artifacts created by the skill itself in user projects
+.claude/discover/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

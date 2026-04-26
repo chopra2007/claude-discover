@@ -1,0 +1,146 @@
+# discover
+
+Methodical 5-pass workflow for adding new features to existing software or automation systems with high success rate and zero redundancy. Composes existing OMC and superpowers skills via tmux multi-agent orchestration — does not reinvent them.
+
+The point: cut the failure rate of "throw a feature at the codebase and hope" by enforcing a research and validation gate before code gets written.
+
+---
+
+## Quick Start
+
+**Step 1 — Install via the Claude Code plugin marketplace:**
+
+```
+/plugin marketplace add https://github.com/chopra2007/claude-discover
+/plugin install discover
+```
+
+**Step 2 — Reload plugins:**
+
+```
+/reload-plugins
+```
+
+**Step 3 — Use it:**
+
+```
+discover: add reddit sentiment scoring to the trade idea bot
+```
+
+That's it.
+
+---
+
+## Triggers
+
+The skill activates on one of three explicit forms:
+
+| Trigger | Example |
+|---------|---------|
+| `/discover` slash command | `/discover` |
+| Message starting with `discover:` | `discover: add CSV export` |
+| The literal phrase **"discover skill"** | `use the discover skill to add wallet attribution` |
+
+It will NOT activate on plain "add a feature", "build me X", "extend my system", etc. The trigger is intentionally narrow because this is a heavyweight workflow.
+
+---
+
+## What it does
+
+| Pass | What happens | Output |
+|------|--------------|--------|
+| **0** — System Analysis | Parallel `explore` agents map the existing codebase; `architect` synthesizes a system map | `pass-0-system-map.md` |
+| **1** — External Research | `external-context` + `sciomc` (and optional `superpowers:brainstorming`) gather candidate features from real-world sources | `pass-1-candidates.md` |
+| **2** — Filter & Prioritize | `analyst` removes redundancy vs Pass 0; `critic` identifies failure modes; rank by quality/edge/feasibility | `pass-2-filtered.md` |
+| **3** — Adversarial + Cross-Model | `critic` + `security-reviewer` adversarial pass, then `ccg` (Claude-Codex-Gemini) cross-model synthesis with agreement matrix | `pass-3-stress-tested.md` |
+| **4** — Implementation Plan | `ralplan` consensus loop produces a build-ready plan; emits a kickoff prompt | `final-plan.md` + `EXECUTE.md` |
+| **5** — Execution (separate session) | Paste kickoff prompt in a fresh session → `ralph` loop → executor + test-engineer + verifier → flip feature flags + restart service → direct commit + push to current branch | `pass-5-execution-log.md` |
+
+All artifacts live in `.claude/discover/<run-name>/` so the workflow survives context compaction or terminal restarts.
+
+---
+
+## Setup options the skill asks at start
+
+- **Run name** — kebab-case slug used as the key for everything in `.claude/discover/`
+- **Mode** — pause-for-review after each pass, OR run all 5 autonomously
+- **Layout** — 3-pane (Pro plan equivalent, lean) or 6-pane (Max plan equivalent, full parallel)
+  - 3-pane fits comfortably within a Pro plan's 5-hour window
+  - 6-pane uses ~2× the agent overhead but runs researchers in parallel for faster wall-clock — only pick on Max
+
+---
+
+## Greenfield handling
+
+If `discover` detects fewer than ~10 source files in the project, it auto-degrades to a 4-pass mode (skips Pass 0 — there's nothing to analyze). It tells you this is happening so you can override if you want.
+
+---
+
+## Pass 5 semantics
+
+"Live and ready to go" in this skill means: code in, tests pass, feature flags flipped, running service restarted/reloaded so the new feature is firing on the local box. It does NOT mean a full prod-deploy pipeline. If your prod is a different machine, you'll need to handle that separately.
+
+Git push: direct to the current branch, no PR flow. If you want PR-based review, use `git-master` manually after Pass 5 completes.
+
+---
+
+## Prerequisites
+
+- **Claude Code** CLI
+- **tmux** — required for parallel multi-agent panes
+- **OMC (Oh My ClaudeCode)** — required for `ralplan`, `ccg`, `ralph`, `external-context`, `sciomc`, and the agent system. Install via `/plugin marketplace add https://github.com/Yeachan-Heo/oh-my-claudecode` then `/plugin install oh-my-claudecode`.
+- **superpowers** plugin (optional) — for Pass 1 ideation via `brainstorming`
+- **git** — needed for Pass 5 commit/push (skipped if no GitHub remote)
+
+The skill checks these at startup and tells you what's missing before doing anything destructive.
+
+---
+
+## Repository structure
+
+```
+.
+├── .claude-plugin/
+│   ├── marketplace.json     # marketplace catalog
+│   └── plugin.json          # plugin manifest
+├── skills/
+│   └── discover/
+│       ├── SKILL.md         # main 5-pass workflow instructions
+│       ├── discover.sh      # tmux session helper (--layout 3|6)
+│       └── references/
+│           ├── tmux-layout.md
+│           ├── pass-templates.md
+│           └── kickoff-prompt.md
+├── README.md
+└── LICENSE
+```
+
+This is a single-plugin marketplace — the same repo serves as both the marketplace catalog and the plugin source.
+
+---
+
+## Alternative install (without the marketplace flow)
+
+If you don't want to use the plugin marketplace, you can still install the skill directly:
+
+```bash
+git clone https://github.com/chopra2007/claude-discover.git
+cp -r claude-discover/skills/discover ~/.claude/skills/
+chmod +x ~/.claude/skills/discover/discover.sh
+```
+
+Then it's available as a regular skill (no marketplace involvement).
+
+---
+
+## License
+
+MIT
+
+---
+
+## Inspired by
+
+- [Oh My ClaudeCode](https://github.com/Yeachan-Heo/oh-my-claudecode) — the agent and workflow primitives this skill composes
+- [Superpowers](https://github.com/obra/superpowers) — the brainstorming pattern used optionally in Pass 1
+- The 4-pass adversarial-discovery pattern, extended with a 5th execution pass and `ccg` cross-model synthesis
