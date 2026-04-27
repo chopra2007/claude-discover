@@ -54,13 +54,20 @@ When the skill triggers, do these things in order:
 
 1. **Read `state.json` if it exists.** If the user is resuming a previous run (i.e. they invoked `discover:` and a state file exists for the same feature), offer to resume from the last completed pass. Don't silently overwrite.
 
-2. **Ask the three setup questions:**
-   - **Run name**: confirm or correct the auto-generated slug.
+2. **Ask the three setup questions — REQUIRED, even under "always proceed" / no-confirmation user instructions.**
+
+   These are parameter inputs, not "shall I proceed?" confirmations. They cannot be auto-defaulted because each one materially changes what the run does (filesystem key, token budget, parallelism, review checkpoints). A user-level rule like "never ask for confirmation" / "always proceed without asking" does NOT apply here — those rules govern yes/no gates on already-specified work. Setup parameters for a heavyweight workflow are a different category, and the user explicitly opted into this skill's heavyweight nature by triggering it.
+   
+   Ask all three in a single message, then wait for the answer. Do not pick defaults silently. Do not infer from CLAUDE.md / GEMINI.md / AGENTS.md. If the user replies with partial answers, ask only for the missing ones — don't fill in the rest.
+   
+   - **Run name**: confirm or correct the auto-generated kebab-case slug. This becomes the directory key at `.claude/discover/<run-name>/` for every artifact (state.json, pass outputs, EXECUTE.md), and it's what survives context compaction as the resume key. Renaming after the run starts is awkward because EXECUTE.md embeds the absolute path.
    - **Mode**: pause-for-review after each pass, OR run all 5 passes autonomously and present the final result. Pass 5 always pauses (it's a separate session anyway — see below). The mode question only governs Passes 1–4.
    - **Tmux layout**: 3-pane (lean) or 6-pane (full parallel). Frame this in plan-tier terms because that's what users care about:
      - **3-pane** = Pro plan equivalent. One orchestrator + one architect/critic + one researcher. Sequential where the 6-pane would parallelize. Fits comfortably within a Pro plan's 5-hour usage window for non-trivial runs. Choose this when running on Pro, or when you want a quick run.
      - **6-pane** = Max plan equivalent. Full layout with separate orchestrator, architect, planner, critic, and two researchers. Researchers run in parallel — faster wall-clock, but ~2x token usage of the 3-pane mode. A 6-pane run on Pro will eat the 5-hour limit fast; only choose this on Max (or when you don't care about budget).
-   - Default suggestion: 3-pane unless the user explicitly says they're on Max.
+   - Suggest 3-pane as the recommendation, but do not pick it without an answer.
+
+   Only after the user answers all three do you proceed to step 3 (greenfield detection). If the user types something that bypasses the questions ("just go", "do it"), still answer the parameter questions yourself with explicit defaults stated in the chat — never silently — so the user can see and correct what you picked.
 
 3. **Detect greenfield.** Run `git ls-files | head -50` and `find . -maxdepth 2 -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.rs" \) | head -20` (adjust extensions to context). If the project has fewer than ~10 source files or no recognizable structure, it's greenfield. **In greenfield, skip Pass 0 and proceed to Pass 1 with a one-line note in `state.json`.** Tell the user this is happening and why.
 
@@ -331,6 +338,8 @@ Read these as needed; don't preload them.
 
 ## Anti-patterns to avoid
 
+- **Skipping the three setup questions because the user has a "no confirmation" rule in CLAUDE.md.** Those questions are parameter inputs, not yes/no gates. Auto-defaulting them — especially `mode` and `layout` — silently strips the user's ability to control token budget and review checkpoints. Always ask.
+- **Inventing a layout outside `{3, 6}`** (e.g. "agent-tool-parallel"). The two layouts are codified for a reason — token budget and pane scripting in `discover.sh`. If tmux is unavailable, say so and stop; do not silently substitute.
 - **Skipping Pass 0 to "save time."** It's the redundancy guard. Without it, Pass 1 will propose features that already exist.
 - **Letting researcher panes infer functionality from filenames.** Source must be read.
 - **Treating ccg's output as gospel.** It's a tiebreaker / second opinion, not an oracle. The user makes the call on disagreements.
