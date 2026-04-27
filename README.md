@@ -62,7 +62,7 @@ All artifacts live in `.claude/discover/<run-name>/` so the workflow survives co
 
 ## Setup options the skill asks at start
 
-- **Run name** — kebab-case slug used as the key for everything in `.claude/discover/`
+- **Run name** — short kebab-case slug (e.g. `reddit-sentiment`, `csv-export`) that becomes the directory name at `.claude/discover/<run-name>/` where every artifact for this run lives: `state.json`, the per-pass markdown files, and `EXECUTE.md`. It's also the **resume key** — if your terminal dies or context compacts mid-run, re-invoking `discover:` with the same name picks up where it left off. And `EXECUTE.md` (the prompt you paste into a fresh session for Pass 5) embeds the absolute path that includes this slug, so renaming after the run starts is awkward. The skill auto-suggests one from your feature description; you can confirm or correct it.
 - **Mode** — pause-for-review after each pass, OR run all 5 autonomously
 - **Layout** — 3-pane (Pro plan equivalent, lean) or 6-pane (Max plan equivalent, full parallel)
   - 3-pane fits comfortably within a Pro plan's 5-hour window
