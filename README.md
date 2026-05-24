@@ -1,6 +1,6 @@
 # discover
 
-Methodical 5-pass workflow for adding new features to existing software or automation systems with high success rate and zero redundancy. Composes existing OMC and superpowers skills via tmux multi-agent orchestration — does not reinvent them.
+Methodical 5-pass workflow for adding new features to existing software or automation systems with high success rate and zero redundancy. Composes existing OMC and superpowers skills via parallel multi-agent orchestration (tmux panes or native Claude Code `Agent` dispatch) — does not reinvent them.
 
 The point: cut the failure rate of "throw a feature at the codebase and hope" by enforcing a research and validation gate before code gets written.
 
@@ -64,9 +64,8 @@ All artifacts live in `.claude/discover/<run-name>/` so the workflow survives co
 
 - **Run name** — short kebab-case slug (e.g. `reddit-sentiment`, `csv-export`) that becomes the directory name at `.claude/discover/<run-name>/` where every artifact for this run lives: `state.json`, the per-pass markdown files, and `EXECUTE.md`. It's also the **resume key** — if your terminal dies or context compacts mid-run, re-invoking `discover:` with the same name picks up where it left off. And `EXECUTE.md` (the prompt you paste into a fresh session for Pass 5) embeds the absolute path that includes this slug, so renaming after the run starts is awkward. The skill auto-suggests one from your feature description; you can confirm or correct it.
 - **Mode** — pause-for-review after each pass, OR run all 5 autonomously
-- **Layout** — 3-pane (Pro plan equivalent, lean) or 6-pane (Max plan equivalent, full parallel)
-  - 3-pane fits comfortably within a Pro plan's 5-hour window
-  - 6-pane uses ~2× the agent overhead but runs researchers in parallel for faster wall-clock — only pick on Max
+- **Layout type** — tmux (separate terminal panes) or native (Claude Code's built-in parallel `Agent` dispatch, no tmux required)
+- **Agent count** — how many parallel agents to use (suggested: 2–6). More agents = faster research passes but higher token cost. With fewer agents, the orchestrator combines roles sequentially in shared slots.
 
 ---
 
@@ -87,9 +86,9 @@ Git push: direct to the current branch, no PR flow. If you want PR-based review,
 ## Prerequisites
 
 - **Claude Code** CLI
-- **tmux** — required for parallel multi-agent panes
+- **tmux** — optional; required only for the tmux layout. The native layout uses Claude Code's built-in parallel `Agent` dispatch and works without tmux.
 - **OMC (Oh My ClaudeCode)** — required for `ralplan`, `ccg`, `ralph`, `external-context`, `sciomc`, and the agent system. Install via `/plugin marketplace add https://github.com/Yeachan-Heo/oh-my-claudecode` then `/plugin install oh-my-claudecode`.
-- **superpowers** plugin (optional) — for Pass 1 ideation via `brainstorming`
+- **superpowers** plugin (optional) — for Pass 1 ideation via `brainstorming`, and Pass 5 verification gate
 - **git** — needed for Pass 5 commit/push (skipped if no GitHub remote)
 
 The skill checks these at startup and tells you what's missing before doing anything destructive.
@@ -106,7 +105,7 @@ The skill checks these at startup and tells you what's missing before doing anyt
 ├── skills/
 │   └── discover/
 │       ├── SKILL.md         # main 5-pass workflow instructions
-│       ├── discover.sh      # tmux session helper (--layout 3|6)
+│       ├── discover.sh      # tmux session helper (--layout 2|3|4|5|6)
 │       └── references/
 │           ├── tmux-layout.md
 │           ├── pass-templates.md

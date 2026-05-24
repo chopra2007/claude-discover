@@ -1,6 +1,6 @@
 ---
 name: discover
-description: Methodical 5-pass workflow (existing-system analysis, external research, filter/prioritize, adversarial+ccg cross-model stress test, ralplan implementation plan, autonomous execution with verification and git push) for adding new features to existing software or automation systems with high success rate and zero redundancy. Composes OMC and superpowers skills rather than reimplementing them. ONLY trigger when one of three hard triggers is present in the user's message — the `/discover` slash command, a message starting with `discover` followed by a colon, or the literal phrase "discover skill" anywhere in the message. Words like "add", "build", "feature", "extend", or "improve" alone are NEVER sufficient. If none of the three hard triggers is present, do NOT activate even if the request seems like a perfect fit; let the normal flow handle it. The user has chosen explicit-invocation-only because this skill is intentionally heavyweight.
+description: Methodical 5-pass workflow (existing-system analysis, external research, filter/prioritize, adversarial+ccg cross-model stress test, ralplan implementation plan, autonomous execution with verification and git push) for adding new features to existing software or automation systems with high success rate and zero redundancy. Composes OMC and superpowers skills rather than reimplementing them. ONLY trigger when one of four hard triggers is present in the user's message — the `/discover` slash command, a message starting with `discover` followed by a colon (including `discover: resume <name>` for resuming Pass 5 in a fresh session), or the literal phrase "discover skill" anywhere in the message. Words like "add", "build", "feature", "extend", or "improve" alone are NEVER sufficient. If none of the four hard triggers is present, do NOT activate even if the request seems like a perfect fit; let the normal flow handle it. The user has chosen explicit-invocation-only because this skill is intentionally heavyweight.
 ---
 
 # discover — 5-Pass Feature Discovery & Execution
@@ -11,19 +11,20 @@ The point: cut the failure rate of "throw a feature at the codebase and hope" by
 
 ## When this fires
 
-Only on one of three explicit triggers:
+Only on one of four explicit triggers:
 
 - `/discover` slash command
 - A message that starts with `discover:` (e.g. `discover: add reddit sentiment to the trade bot`)
+- `discover: resume <run-name>` — re-enters Pass 5 in a fresh session using artifacts saved from Pass 4
 - The literal phrase **"discover skill"** anywhere in the message (e.g. `use the discover skill to add reddit sentiment`)
 
-If none of those three triggers is in the message, this skill does NOT activate — even if the request looks like a perfect fit. Phrases like "add a feature", "extend my system", "build me X", or "improve the bot" alone are never enough. The user has chosen explicit-invocation-only on purpose to avoid heavyweight workflows for simple changes.
+If none of those four triggers is in the message, this skill does NOT activate — even if the request looks like a perfect fit. Phrases like "add a feature", "extend my system", "build me X", or "improve the bot" alone are never enough. The user has chosen explicit-invocation-only on purpose to avoid heavyweight workflows for simple changes.
 
 ## Prerequisites you should sanity-check before starting
 
 Before kicking off Pass 0, verify these are available. If any are missing, tell the user what to install and stop — don't try to limp along without them.
 
-- **tmux** — required for parallel multi-agent panes. Check with `command -v tmux`.
+- **tmux** — required only for the tmux layout. Optional — the native layout uses Claude Code's built-in parallel `Agent` / `Task` dispatch instead and does not require tmux at all. Check with `command -v tmux`; if missing, the native layout is your path forward.
 - **OMC (Oh My ClaudeCode)** — required for the agent and skill primitives this workflow leans on. Check by looking for `~/.claude/plugins/oh-my-claudecode` or running `/oh-my-claudecode:omc-doctor` if the user wants a deeper check.
 - **superpowers** plugin (optional but recommended for Pass 1 ideation) — check `~/.claude/plugins/superpowers`.
 - **git** — needed for Pass 5 commit/push step. Check with `command -v git`.
@@ -62,49 +63,51 @@ When the skill triggers, do these things in order:
    
    - **Run name**: confirm or correct the auto-generated kebab-case slug. When you ask the user, phrase it so they understand *why* it matters — not just "what should we call this run?". Tell them: this slug becomes the directory at `.claude/discover/<run-name>/` where every artifact for this run lives (state.json + per-pass markdown + EXECUTE.md), it's the **resume key** if context compacts or the terminal dies (re-invoking `discover:` with the same name picks up from the last completed pass), and `EXECUTE.md` (the Pass 5 kickoff prompt) embeds the absolute path containing this slug — so renaming mid-run is awkward. Show them the auto-suggested slug and ask them to confirm or replace it. Example phrasing: *"**Run name** — I'll use `reddit-sentiment` as the slug for this run. All artifacts (state.json, pass-*.md, EXECUTE.md) will live at `.claude/discover/reddit-sentiment/`, and that name is the key you'd re-use to resume if context compacts or you reopen the session later. Confirm, or give me a different short kebab-case name."*
    - **Mode**: pause-for-review after each pass, OR run all 5 passes autonomously and present the final result. Pass 5 always pauses (it's a separate session anyway — see below). The mode question only governs Passes 1–4.
-   - **Tmux layout**: 3-pane (lean) or 6-pane (full parallel). Frame this in plan-tier terms because that's what users care about:
-     - **3-pane** = Pro plan equivalent. One orchestrator + one architect/critic + one researcher. Sequential where the 6-pane would parallelize. Fits comfortably within a Pro plan's 5-hour usage window for non-trivial runs. Choose this when running on Pro, or when you want a quick run.
-     - **6-pane** = Max plan equivalent. Full layout with separate orchestrator, architect, planner, critic, and two researchers. Researchers run in parallel — faster wall-clock, but ~2x token usage of the 3-pane mode. A 6-pane run on Pro will eat the 5-hour limit fast; only choose this on Max (or when you don't care about budget).
-   - Suggest 3-pane as the recommendation, but do not pick it without an answer.
+   - **Layout type**: tmux or native.
+     - **tmux** — agents run in separate terminal panes via `discover.sh`. Requires tmux to be installed. Good when you want visible parallel panes or are resuming a layout that's already running.
+     - **native** — agents are dispatched as parallel `Agent` / `Task` tool calls from `superpowers:dispatching-parallel-agents`. No tmux needed. Recommended on systems without tmux or when you want the skill to manage parallelism internally. Works identically to tmux from the perspective of the workflow; `final-plan.md` schema is the same regardless.
+   - Suggest native as the recommendation when tmux is not installed; otherwise ask without a default.
+   - **How many parallel agents?** (suggested: 2–6). Below 2 there is no parallelism benefit. Above 6, coordination overhead and token costs outweigh the gains. Frame the tradeoff: fewer agents = lower token cost + fits smaller API quotas; more agents = faster wall-clock for research-heavy passes. The user's chosen count applies to both tmux and native layouts. For tmux it controls how many panes are created; for native it controls how many parallel `Agent` calls are dispatched per pass. Do not pick a default silently.
 
    Only after the user answers all three do you proceed to step 3 (greenfield detection). If the user types something that bypasses the questions ("just go", "do it"), still answer the parameter questions yourself with explicit defaults stated in the chat — never silently — so the user can see and correct what you picked.
 
 3. **Detect greenfield.** Run `git ls-files | head -50` and `find . -maxdepth 2 -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.rs" \) | head -20` (adjust extensions to context). If the project has fewer than ~10 source files or no recognizable structure, it's greenfield. **In greenfield, skip Pass 0 and proceed to Pass 1 with a one-line note in `state.json`.** Tell the user this is happening and why.
 
-4. **Spin up the tmux session.** Use `discover.sh` (bundled with this skill) to create the named tmux session with role panes. Pass `--layout 3` or `--layout 6` based on the answer above. See `references/tmux-layout.md` for the layout details and how to dispatch agents into panes.
+4. **Set up the agent layout.**
+   - **tmux layout:** Run `discover.sh <run-name> --layout <agent-count>` where `<agent-count>` is the number chosen in question 3. The script creates the named tmux session with the right number of panes and writes per-pane `.env` files. See `references/tmux-layout.md` for layout details and dispatch helpers.
+   - **Native layout:** Invoke `superpowers:dispatching-parallel-agents` to establish the dispatch pattern. Write per-agent `.env` files to `${RUN_DIR}/.agent-<n>.env` (same format as tmux pane env files). No tmux session is created. Agents will be dispatched as parallel `Agent` tool calls rather than `tmux send-keys` commands. Record `layout: "native"` and `agent_count: <n>` in `state.json`.
 
-5. **Initialize `state.json`** with the run name, mode, layout choice, current pass = 0 (or 1 if greenfield), agent slots, and a creation timestamp.
+5. **Initialize `state.json`** with the run name, mode, layout type (`tmux` or `native`), agent count, current pass = 0 (or 1 if greenfield), agent slots, and a creation timestamp.
 
 Save `state.json` after every meaningful step. It's the recovery point.
 
-## The Tmux Multi-Agent Layout
+## Agent Layout Options
 
-This skill supports two layouts. Pick at startup based on plan tier (see Initial Setup question #2). Roles map to OMC agents where possible.
+This skill supports two layout types. Pick at startup (see Initial Setup). Both produce identical `final-plan.md` output and use the same per-pass workflow; the only difference is how agents are dispatched.
 
-### 6-pane layout (Max plan equivalent — full parallel)
+### Tmux layout
 
-| Pane | Role | Model | Maps to (OMC) |
-|------|------|-------|---------------|
-| `orchestrator` | Owns the run, dispatches work, reads/writes `state.json` | opus | (top-level Claude) |
-| `architect` | System design, integration points, trade-offs | opus | `architect` |
-| `planner` | Task sequencing, plan structure | opus | `planner` |
-| `critic` | Adversarial review, gap analysis | opus | `critic` |
-| `researcher-1` | External + codebase research | sonnet | `explore` / `document-specialist` |
-| `researcher-2` | External + codebase research (parallel) | sonnet | `explore` / `document-specialist` |
+Agents run in separate terminal panes created by `discover.sh`. Requires tmux.
 
-Researchers are sonnet because the work is breadth-heavy and parallelizable; the reasoning panes (architect, planner, critic, orchestrator) are opus because each decision they make influences everything downstream.
+**Role mapping (scales with agent count):**
 
-### 3-pane layout (Pro plan equivalent — lean)
+| Agent slot | Role | Model |
+|------------|------|-------|
+| `orchestrator` | Owns the run, dispatches work, reads/writes `state.json` | opus |
+| `architect` | System design, integration points, trade-offs | opus |
+| `planner` | Task sequencing, plan structure | opus |
+| `critic` | Adversarial review, gap analysis | opus |
+| `researcher-N` (one per remaining agent slot) | External + codebase research | sonnet |
 
-| Pane | Role | Model | Notes |
-|------|------|-------|-------|
-| `orchestrator` | Owns the run, dispatches sequentially | opus | Same as 6-pane |
-| `architect-critic` | Combined architect + critic + planner | opus | Single pane wears all three reasoning hats; orchestrator switches its prompt by phase |
-| `researcher` | All research (codebase + external) | sonnet | Sequential rather than parallel — no second researcher |
+With fewer agents, the orchestrator combines roles sequentially (e.g. 3 agents → orchestrator + architect-critic + researcher; 2 agents → orchestrator + architect-critic-researcher). With more agents, dedicated researcher panes run in parallel. The `discover.sh` script handles pane creation for any count from 2 to 6.
 
-The 3-pane layout trades wall-clock speed for token economy. Roughly half the agent overhead of 6-pane, fits in a Pro plan's 5-hour window. The orchestrator drives sequentially: it gives the architect-critic pane the architect prompt for design work, then re-prompts it as critic for adversarial review, then as planner for sequencing.
+Researchers are sonnet because the work is breadth-heavy and output is reviewed by an opus synthesizer. Reasoning roles (architect, planner, critic) are opus because their decisions propagate downstream.
 
-`discover.sh --layout <3|6>` sets up the right number of panes and writes per-pane `.env` files the orchestrator reads when dispatching. Read that script before modifying the layout — it codifies decisions that aren't worth re-deriving.
+### Native layout (no tmux required)
+
+Agents are dispatched as parallel `Agent` tool calls from the orchestrator using the pattern in `superpowers:dispatching-parallel-agents`. No tmux session is created. The orchestrator is the current Claude Code session itself; parallel work is sent as multiple simultaneous `Agent` / `Task` invocations in a single message. See `references/tmux-layout.md` for the native dispatch pattern and how it maps to the tmux pane model.
+
+The native layout supports the same agent count range (2–6) as the tmux layout. Each "slot" becomes a named parallel `Agent` invocation instead of a tmux pane.
 
 ---
 
@@ -116,7 +119,9 @@ The 3-pane layout trades wall-clock speed for token economy. Roughly half the ag
 
 **Approach:**
 
-1. Dispatch parallel `explore` agents (haiku tier where available, sonnet otherwise) to the `researcher-1` and `researcher-2` panes. Split coverage by directory or concern (e.g., one researcher covers `src/data/` + `src/signals/`, the other covers `src/output/` + `src/config/`). Each writes findings to a scratch file in the run directory.
+1. Dispatch parallel `explore` agents (haiku tier where available, sonnet otherwise) to cover the codebase. Split coverage by directory or concern (e.g., one researcher covers `src/data/` + `src/signals/`, the other covers `src/output/` + `src/config/`). Each writes findings to a scratch file in the run directory.
+   - **Tmux layout:** `tmux send-keys` to each `researcher-N` pane.
+   - **Native layout:** Dispatch all researcher agents as parallel `Agent` tool calls in a single message — don't send them sequentially.
 
 2. While researchers run, the orchestrator reads `README.md`, top-level config files, `package.json`/`Cargo.toml`/`pyproject.toml`, and any obvious entrypoints to build a high-level mental model.
 
@@ -234,24 +239,24 @@ This pass is largely delegated to `/oh-my-claudecode:ralplan` — its Planner + 
 8. **Verification Checklist** — concrete checks Pass 5 must pass before declaring success
 
 **Then, generate the kickoff prompt:**
-- Write `EXECUTE.md` containing the prompt the user will paste into a fresh session.
-- Use the template at `references/kickoff-prompt.md`. Fill in the run-name, the absolute path to `final-plan.md`, the feature activation specifics, and the git push policy.
-- Print the same prompt to the chat with a clear marker like:
+- Write `EXECUTE.md` using the template at `references/kickoff-prompt.md`. Fill in all placeholders (run-name, absolute path to `final-plan.md`, activation summary, git remote).
+- The file the user pastes from is `EXECUTE.md`; the *prompt they type* must be exactly one short line — `discover: resume <run-name>`. Do NOT ask them to copy-paste the contents of `EXECUTE.md`. The skill re-activates from the one-liner and reads `EXECUTE.md` from disk itself.
+- Print to chat with a clear marker:
 
   ```
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ✅ Plan saved to: <abs-path>/final-plan.md
-  ✅ Kickoff prompt saved to: <abs-path>/EXECUTE.md
+  ✅ Pass 5 context saved to: <abs-path>/EXECUTE.md
 
-  When ready, clear the terminal (or open a fresh
-  Claude Code session) and paste the prompt below
-  to begin Pass 5 (Execution).
+  Open a fresh Claude Code session and type:
+
+      discover: resume <run-name>
+
+  The skill will re-activate and read EXECUTE.md from disk.
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  <kickoff prompt here>
   ```
 
-The reason for the context split: Passes 0–4 burn a lot of context on research and synthesis. Pass 5 is execution-heavy and benefits from a clean slate. Forcing the user to paste in a new session is the simplest reliable way to guarantee that.
+The reason for the context split: Passes 0–4 burn a lot of context on research and synthesis. Pass 5 is execution-heavy and benefits from a clean slate. The one-liner trigger is the simplest reliable way to guarantee that without making the user paste a wall of text.
 
 If autonomous mode was selected, this is still where the skill stops — Pass 5 is *always* a separate session because the context-clearing benefit is structural.
 
@@ -259,7 +264,7 @@ If autonomous mode was selected, this is still where the skill stops — Pass 5 
 
 ## Pass 5 — Execution (separate session)
 
-This pass runs when the user pastes the `EXECUTE.md` kickoff prompt into a fresh Claude Code session. The skill re-activates, reads `state.json` and `final-plan.md`, and runs the execution flow.
+This pass runs when the user types `discover: resume <run-name>` into a fresh Claude Code session. The skill re-activates, locates the run directory at `.claude/discover/<run-name>/`, reads `EXECUTE.md`, `state.json`, and `final-plan.md`, then runs the execution flow. The user does NOT paste `EXECUTE.md` contents — they type only the one-line trigger; the skill reads the file from disk.
 
 **Goal:** Implement, verify, activate, and (if applicable) push. Minimize human input — only ask when genuinely stuck on direction.
 
@@ -277,13 +282,15 @@ This pass runs when the user pastes the `EXECUTE.md` kickoff prompt into a fresh
    - Tail logs for ~10–30 seconds and confirm the new feature is producing expected output.
    - This is "Option 2" semantics: functional + features turned on, not a full prod deploy.
 
-4. **Commit and push.**
+4. **Verify before committing.** Invoke `superpowers:verification-before-completion` now. This skill enforces "no completion claim without fresh evidence in the same message" — a stronger gate than the verifier loop alone. It must confirm the verification checklist from `final-plan.md` section 8 is fully satisfied before the commit step runs. If it raises any open items, resolve them first (loop back to ralph) before proceeding.
+
+5. **Commit and push.**
    - Check `git remote -v`. If there's a remote pointing at github.com, proceed; otherwise skip with a note.
    - Stage all changes, commit with a message summarizing the feature(s) added (reference the run name and a one-line summary from `final-plan.md`).
    - Push to the **current branch** directly. (No PR flow — user opted for fastest path.)
    - If the push fails (auth, conflict), surface the error to the user with the exact next step they need to take, and stop. Don't try to force-push or rewrite history.
 
-5. **Final report.** Append to `pass-5-execution-log.md`:
+6. **Final report.** Append to `pass-5-execution-log.md`:
    - What was implemented (file list + summary)
    - Test results
    - Activation confirmation (log excerpts showing the feature working)
@@ -309,7 +316,7 @@ Otherwise, plow through.
 | 2 | `analyst`, `critic` | Filtering against reality + failure-mode discovery |
 | 3 | `critic`, `security-reviewer`, `ccg` | Adversarial + cross-model robustness |
 | 4 | `ralplan` | Consensus-based implementation planning (Planner+Architect+Critic) |
-| 5 | `ralph`, `executor`, `test-engineer`, `verifier`, `git-master` | Loop-until-verified execution with auto-commit |
+| 5 | `ralph`, `executor`, `test-engineer`, `verifier`, `superpowers:verification-before-completion`, `git-master` | Loop-until-verified execution; explicit verification gate before commit |
 
 If any of these skills is unavailable on the user's system, fall back gracefully: use direct tool calls instead, but note the degradation in `state.json` so the user knows the run was less rigorous than the full pipeline.
 
@@ -338,8 +345,8 @@ Read these as needed; don't preload them.
 
 ## Anti-patterns to avoid
 
-- **Skipping the three setup questions because the user has a "no confirmation" rule in CLAUDE.md.** Those questions are parameter inputs, not yes/no gates. Auto-defaulting them — especially `mode` and `layout` — silently strips the user's ability to control token budget and review checkpoints. Always ask.
-- **Inventing a layout outside `{3, 6}`** (e.g. "agent-tool-parallel"). The two layouts are codified for a reason — token budget and pane scripting in `discover.sh`. If tmux is unavailable, say so and stop; do not silently substitute.
+- **Skipping the three setup questions because the user has a "no confirmation" rule in CLAUDE.md.** Those questions are parameter inputs, not yes/no gates. Auto-defaulting them — especially `mode`, `layout type`, and `agent count` — silently strips the user's ability to control token budget and review checkpoints. Always ask.
+- **Silently picking an agent count without asking.** The user must specify it. If tmux is unavailable, offer native as the layout; still ask for agent count.
 - **Skipping Pass 0 to "save time."** It's the redundancy guard. Without it, Pass 1 will propose features that already exist.
 - **Letting researcher panes infer functionality from filenames.** Source must be read.
 - **Treating ccg's output as gospel.** It's a tiebreaker / second opinion, not an oracle. The user makes the call on disagreements.

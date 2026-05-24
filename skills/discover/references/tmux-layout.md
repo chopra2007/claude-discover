@@ -1,56 +1,36 @@
-# Tmux Layout — discover
+# Layout Reference — discover
 
-The `discover.sh` helper creates a tmux session named `discover-<run-name>` with one of two layouts. The orchestrator dispatches work into panes by sending keystrokes via `tmux send-keys`.
-
-## Picking a layout — Pro vs Max
-
-The choice is mostly about your Claude plan and how much budget you want to spend on a single run.
-
-| Plan | Recommended | Why |
-|------|-------------|-----|
-| **Pro (5-hr usage window)** | 3-pane | A 6-pane run with parallel researchers will eat the 5-hour limit fast. 3-pane is roughly half the agent overhead. |
-| **Max** | 6-pane | More parallelism, faster wall-clock, no realistic budget concern. |
-
-You can override either way — the skill asks at startup. If the user picks 6-pane on Pro and burns through their window mid-run, the saved `state.json` lets them resume on a new window.
+The skill supports two layout types. Both use the same per-pass workflow and produce identical `final-plan.md` output. The choice is how agents are dispatched.
 
 ---
 
-## 6-pane layout
+## Tmux layout
 
-Indexes are tmux's internal pane indexes after `select-layout tiled`. They're stable as long as panes aren't killed mid-run.
+The `discover.sh` helper creates a tmux session named `discover-<run-name>`. The orchestrator dispatches work into panes by sending keystrokes via `tmux send-keys`.
 
-| Pane | Role | Default model | Reads env from |
-|------|------|---------------|----------------|
-| 0.0 | orchestrator | opus | `.orchestrator.env` |
-| 0.1 | architect | opus | `.architect.env` |
-| 0.2 | planner | opus | `.planner.env` |
-| 0.3 | critic | opus | `.critic.env` |
-| 0.4 | researcher-1 | sonnet | `.researcher-1.env` |
-| 0.5 | researcher-2 | sonnet | `.researcher-2.env` |
+### Agent count and role mapping
 
-Researchers run in parallel — that's the main point of this layout.
+The `--layout <n>` flag controls how many panes are created. Roles are assigned as follows:
 
-## 3-pane layout
+| Count | Slots created |
+|-------|--------------|
+| 2 | orchestrator + architect-critic-researcher |
+| 3 | orchestrator + architect-critic + researcher |
+| 4 | orchestrator + architect + critic + researcher |
+| 5 | orchestrator + architect + critic + researcher-1 + researcher-2 |
+| 6 | orchestrator + architect + planner + critic + researcher-1 + researcher-2 |
 
-| Pane | Role | Default model | Reads env from |
-|------|------|---------------|----------------|
-| 0.0 | orchestrator | opus | `.orchestrator.env` |
-| 0.1 | architect-critic | opus | `.architect-critic.env` |
-| 0.2 | researcher | sonnet | `.researcher.env` |
+With 5–6 agents, researchers run in parallel — that's the main parallelism win. With fewer agents, the orchestrator drives roles sequentially in combined panes.
 
-The `architect-critic` pane wears three hats sequentially: architect for design, critic for adversarial review, planner for sequencing. The orchestrator changes its prompt between phases. The researcher pane handles all research (codebase + external) sequentially.
+### Dispatching work (tmux)
 
----
-
-## Dispatching work
-
-The orchestrator pane is the one the user is interactively connected to. To send a task to another pane:
+To send a task to another pane:
 
 ```bash
 tmux send-keys -t discover-<run>:0.<pane-index> "<command>" C-m
 ```
 
-Example — kick off two parallel researchers in Pass 0 (6-pane mode):
+Example — kick off two parallel researchers in Pass 0 (5 or 6 agents):
 
 ```bash
 # Researcher 1 covers data + signal layers
@@ -62,17 +42,51 @@ tmux send-keys -t discover-reddit-sentiment:0.5 \
   "claude --model sonnet -p 'Read src/output/ and src/config/, write a component inventory to .claude/discover/reddit-sentiment/scratch-r2.md'" C-m
 ```
 
-In 3-pane mode the same Pass 0 work runs in two sequential dispatches to pane `0.2`:
+Don't block on a fixed timer for completion — that's wasteful for fast runs and inadequate for slow ones. Poll for scratch file content.
 
-```bash
-tmux send-keys -t discover-reddit-sentiment:0.2 \
-  "claude --model sonnet -p 'Read src/data/ and src/signals/, write to scratch-r1.md'" C-m
-# wait for completion (poll for scratch-r1.md non-trivial content)
-tmux send-keys -t discover-reddit-sentiment:0.2 \
-  "claude --model sonnet -p 'Read src/output/ and src/config/, write to scratch-r2.md'" C-m
+### Plan tier guidance
+
+| Plan | Suggested agent count | Why |
+|------|-----------------------|-----|
+| **Pro (5-hr usage window)** | 2–3 | Fewer researchers = lower overhead; fits the window for most non-trivial runs |
+| **Max** | 4–6 | More parallelism, faster wall-clock, no realistic budget concern |
+
+You can override either way — the skill asks at startup. If you burn through your window mid-run, the saved `state.json` lets you resume on a new window.
+
+---
+
+## Native layout (no tmux required)
+
+The native layout uses Claude Code's built-in parallel `Agent` / `Task` dispatch from `superpowers:dispatching-parallel-agents`. No tmux session is created — the orchestrator is the current Claude Code session itself.
+
+### Agent count and role mapping
+
+Same role table as tmux above. Each "slot" that would be a tmux pane is instead a named `Agent` invocation.
+
+### Dispatching work (native)
+
+Send all parallel agent calls in a **single message** so they run concurrently:
+
+```
+Agent(name="researcher-1", prompt="Read src/data/ and src/signals/...", ...)
+Agent(name="researcher-2", prompt="Read src/output/ and src/config/...", ...)
 ```
 
-Don't block on a fixed timer for completion — that's wasteful for fast runs and inadequate for slow ones. Poll for scratch file content.
+Wait for both to complete before proceeding (the harness notifies you on completion). Then the orchestrator synthesizes the results, exactly as in tmux mode.
+
+For sequential roles (architect → critic → planner on a combined slot), dispatch them in separate messages, waiting for each to complete before the next.
+
+### Environment files (native)
+
+The orchestrator writes per-agent env files to `${RUN_DIR}/.agent-<role>.env` using the same format as tmux pane env files. Agents read their role and model tier from these files. This keeps `state.json` recovery consistent between layout types.
+
+---
+
+## Why these model tiers
+
+- **Opus** for orchestrator, architect, planner, critic: each decision propagates downstream. A wrong architectural call reaches Pass 4. Cheaping out is false economy.
+- **Sonnet** for researchers: breadth-heavy work reviewed by an opus synthesizer. Right cost/quality balance.
+- **Haiku** as fallback if opus is rate-limited, but expect quality degradation in synthesis steps.
 
 ## Why these tiers
 
