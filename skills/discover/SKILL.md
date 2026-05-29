@@ -55,14 +55,19 @@ When the skill triggers, do these things in order:
 
 1. **Read `state.json` if it exists.** If the user is resuming a previous run (i.e. they invoked `discover:` and a state file exists for the same feature), offer to resume from the last completed pass. Don't silently overwrite.
 
-2. **Ask the three setup questions — REQUIRED, even under "always proceed" / no-confirmation user instructions.**
+2. **Ask the setup questions below — REQUIRED, even under "always proceed" / no-confirmation user instructions.**
 
    These are parameter inputs, not "shall I proceed?" confirmations. They cannot be auto-defaulted because each one materially changes what the run does (filesystem key, token budget, parallelism, review checkpoints). A user-level rule like "never ask for confirmation" / "always proceed without asking" does NOT apply here — those rules govern yes/no gates on already-specified work. Setup parameters for a heavyweight workflow are a different category, and the user explicitly opted into this skill's heavyweight nature by triggering it.
    
-   Ask all three in a single message, then wait for the answer. Do not pick defaults silently. Do not infer from CLAUDE.md / GEMINI.md / AGENTS.md. If the user replies with partial answers, ask only for the missing ones — don't fill in the rest.
+   Ask all of them in a single message, then wait for the answer. Do not pick defaults silently. Do not infer from CLAUDE.md / GEMINI.md / AGENTS.md. If the user replies with partial answers, ask only for the missing ones — don't fill in the rest.
    
    - **Run name**: confirm or correct the auto-generated kebab-case slug. When you ask the user, phrase it so they understand *why* it matters — not just "what should we call this run?". Tell them: this slug becomes the directory at `.claude/discover/<run-name>/` where every artifact for this run lives (state.json + per-pass markdown + EXECUTE.md), it's the **resume key** if context compacts or the terminal dies (re-invoking `discover:` with the same name picks up from the last completed pass), and `EXECUTE.md` (the Pass 5 kickoff prompt) embeds the absolute path containing this slug — so renaming mid-run is awkward. Show them the auto-suggested slug and ask them to confirm or replace it. Example phrasing: *"**Run name** — I'll use `reddit-sentiment` as the slug for this run. All artifacts (state.json, pass-*.md, EXECUTE.md) will live at `.claude/discover/reddit-sentiment/`, and that name is the key you'd re-use to resume if context compacts or you reopen the session later. Confirm, or give me a different short kebab-case name."*
-   - **Mode**: pause-for-review after each pass, OR run all 5 passes autonomously and present the final result. Pass 5 always pauses (it's a separate session anyway — see below). The mode question only governs Passes 1–4.
+   - **Mode**: pause-for-review after each pass, OR run the research/planning passes (1–4) autonomously and present the plan. This question governs only Passes 1–4. How Pass 5 (the actual build) is handled is the separate **Execution handoff** question below.
+   - **Execution handoff** — what happens after the plan (Pass 4) is ready. Three choices:
+     - **build-now** — run Pass 5 (the build) immediately in this same session, no pause. Combined with autonomous Mode, the whole run is hands-off from idea to pushed code.
+     - **review-then-build** — pause after Pass 4 so you can read and approve the plan, then run Pass 5 in this same session once you say go.
+     - **separate-session** (default) — stop after Pass 4 and hand off. You open a fresh Claude Code session and type `discover: resume <run-name>`; Pass 5 runs there with clean context.
+     Frame the tradeoff: **separate-session** is best for large or research-heavy plans, where Passes 0–4 burned a lot of context and the build benefits from a clean slate; **build-now** / **review-then-build** are best for small-to-medium features where switching sessions is more hassle than it's worth. Recommend separate-session as the safe default, but do not pick silently — ask.
    - **Layout type**: tmux or native.
      - **tmux** — agents run in separate terminal panes via `discover.sh`. Requires tmux to be installed. Good when you want visible parallel panes or are resuming a layout that's already running.
      - **native** — agents are dispatched as parallel `Agent` / `Task` tool calls from `superpowers:dispatching-parallel-agents`. No tmux needed. Recommended on systems without tmux or when you want the skill to manage parallelism internally. Works identically to tmux from the perspective of the workflow; `final-plan.md` schema is the same regardless.
@@ -77,7 +82,7 @@ When the skill triggers, do these things in order:
    - **tmux layout:** Run `discover.sh <run-name> --layout <agent-count>` where `<agent-count>` is the number chosen in question 3. The script creates the named tmux session with the right number of panes and writes per-pane `.env` files. See `references/tmux-layout.md` for layout details and dispatch helpers.
    - **Native layout:** Invoke `superpowers:dispatching-parallel-agents` to establish the dispatch pattern. Write per-agent `.env` files to `${RUN_DIR}/.agent-<n>.env` (same format as tmux pane env files). No tmux session is created. Agents will be dispatched as parallel `Agent` tool calls rather than `tmux send-keys` commands. Record `layout: "native"` and `agent_count: <n>` in `state.json`.
 
-5. **Initialize `state.json`** with the run name, mode, layout type (`tmux` or `native`), agent count, current pass = 0 (or 1 if greenfield), agent slots, and a creation timestamp.
+5. **Initialize `state.json`** with the run name, mode, execution handoff (`build-now` / `review-then-build` / `separate-session`), layout type (`tmux` or `native`), agent count, current pass = 0 (or 1 if greenfield), agent slots, and a creation timestamp.
 
 Save `state.json` after every meaningful step. It's the recovery point.
 
@@ -238,10 +243,11 @@ This pass is largely delegated to `/oh-my-claudecode:ralplan` — its Planner + 
 7. **Feature Activation Plan** — which config flags / env vars need to flip to "on" after the code is in place, and how the running service picks up the change (restart vs. hot reload)
 8. **Verification Checklist** — concrete checks Pass 5 must pass before declaring success
 
-**Then, generate the kickoff prompt:**
-- Write `EXECUTE.md` using the template at `references/kickoff-prompt.md`. Fill in all placeholders (run-name, absolute path to `final-plan.md`, activation summary, git remote).
-- The file the user pastes from is `EXECUTE.md`; the *prompt they type* must be exactly one short line — `discover: resume <run-name>`. Do NOT ask them to copy-paste the contents of `EXECUTE.md`. The skill re-activates from the one-liner and reads `EXECUTE.md` from disk itself.
-- Print to chat with a clear marker:
+**Always write `final-plan.md`** — it's the build spec Pass 5 reads in every mode. `EXECUTE.md` is only the handoff file a *fresh* session reads on `discover: resume`, so write it **only in `separate-session` mode** (see below). The same-session modes never read it; if a same-session build is interrupted, the run is still fully resumable from `state.json` + `final-plan.md`, which together hold everything Pass 5 needs.
+
+**Then branch on the Execution handoff choice from setup:**
+
+- **`separate-session` (default):** Write `EXECUTE.md` using the template at `references/kickoff-prompt.md`, filling in all placeholders (run-name, absolute path to `final-plan.md`, activation summary, git remote). Then this is where the skill stops. Print to chat with a clear marker:
 
   ```
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -256,15 +262,22 @@ This pass is largely delegated to `/oh-my-claudecode:ralplan` — its Planner + 
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ```
 
-The reason for the context split: Passes 0–4 burn a lot of context on research and synthesis. Pass 5 is execution-heavy and benefits from a clean slate. The one-liner trigger is the simplest reliable way to guarantee that without making the user paste a wall of text.
+  The *prompt the user types* must be exactly one short line — `discover: resume <run-name>`. Do NOT ask them to copy-paste the contents of `EXECUTE.md`; the skill re-activates from the one-liner and reads the file from disk itself. Why a separate session: Passes 0–4 burn a lot of context on research and synthesis, and Pass 5 (execution-heavy) benefits from a clean slate.
 
-If autonomous mode was selected, this is still where the skill stops — Pass 5 is *always* a separate session because the context-clearing benefit is structural.
+- **`review-then-build`:** Present the plan in chat — show `final-plan.md`'s System Overview and the Verification Checklist (section 8), and say where the full file lives on disk. Ask the user to approve or request changes. Do NOT start Pass 5 until they say go. Once approved, continue straight to Pass 5 below **in this same session** — do not make them type `discover: resume`.
+
+- **`build-now`:** Do not pause. State that the plan is saved and you're proceeding to the build, then continue straight to Pass 5 below **in this same session**.
 
 ---
 
-## Pass 5 — Execution (separate session)
+## Pass 5 — Execution
 
-This pass runs when the user types `discover: resume <run-name>` into a fresh Claude Code session. The skill re-activates, locates the run directory at `.claude/discover/<run-name>/`, reads `EXECUTE.md`, `state.json`, and `final-plan.md`, then runs the execution flow. The user does NOT paste `EXECUTE.md` contents — they type only the one-line trigger; the skill reads the file from disk.
+This pass builds the feature. How you arrive here depends on the Execution handoff choice from setup:
+
+- **`separate-session`:** the user typed `discover: resume <run-name>` into a fresh Claude Code session. The skill re-activates, locates the run directory at `.claude/discover/<run-name>/`, reads `EXECUTE.md`, `state.json`, and `final-plan.md`, then runs the flow below. The user does NOT paste `EXECUTE.md` contents — they type only the one-line trigger; the skill reads the file from disk. (If `EXECUTE.md` is absent — e.g. recovering a `build-now`/`review-then-build` run that was interrupted mid-build — read `state.json` + `final-plan.md` instead; they hold everything needed.)
+- **`build-now` / `review-then-build`:** you arrived here directly from Pass 4 in the *same* session (for `review-then-build`, only after the user approved the plan). `final-plan.md` and any decisions captured during earlier pauses are already in context; just re-read `state.json` to confirm the run parameters and proceed.
+
+Either way, the execution flow below is identical.
 
 **Goal:** Implement, verify, activate, and (if applicable) push. Minimize human input — only ask when genuinely stuck on direction.
 
@@ -345,7 +358,7 @@ Read these as needed; don't preload them.
 
 ## Anti-patterns to avoid
 
-- **Skipping the three setup questions because the user has a "no confirmation" rule in CLAUDE.md.** Those questions are parameter inputs, not yes/no gates. Auto-defaulting them — especially `mode`, `layout type`, and `agent count` — silently strips the user's ability to control token budget and review checkpoints. Always ask.
+- **Skipping the setup questions because the user has a "no confirmation" rule in CLAUDE.md.** Those questions are parameter inputs, not yes/no gates. Auto-defaulting them — especially `mode`, `execution handoff`, `layout type`, and `agent count` — silently strips the user's ability to control token budget, review checkpoints, and whether the build runs in this session or a fresh one. Always ask.
 - **Silently picking an agent count without asking.** The user must specify it. If tmux is unavailable, offer native as the layout; still ask for agent count.
 - **Skipping Pass 0 to "save time."** It's the redundancy guard. Without it, Pass 1 will propose features that already exist.
 - **Letting researcher panes infer functionality from filenames.** Source must be read.
