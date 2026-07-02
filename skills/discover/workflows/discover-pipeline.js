@@ -16,7 +16,7 @@ const DIALS = {
   light:    { mappers: 2, researchers: 2, roundCap: 2, dryStop: 1, p3cap: 3, skeptics: 2, rivals: 1, crossModel: false, breaker: 900_000,   passEst: { 0: 120_000, 1: 200_000, 2: 150_000, 3: 200_000, 4: 200_000 } },
   standard: { mappers: 3, researchers: 3, roundCap: 3, dryStop: 1, p3cap: 5, skeptics: 3, rivals: 2, crossModel: true,  breaker: 2_500_000, passEst: { 0: 300_000, 1: 500_000, 2: 400_000, 3: 600_000, 4: 600_000 } },
   deep:     { mappers: 5, researchers: 4, roundCap: 5, dryStop: 2, p3cap: 7, skeptics: 5, rivals: 3, crossModel: true,  breaker: 6_000_000, passEst: { 0: 600_000, 1: 1_200_000, 2: 800_000, 3: 1_600_000, 4: 1_600_000 } },
-} // token figures = CALIBRATE placeholders; replaced from journal data in Task 12
+} // Light validated by a real 0-4 run (2026-07-02): 793,694 output tokens, 21 agents, completed under the 900k breaker. Standard/Deep still extrapolated (~2.8x / ~6.7x Light); refine when a run at those dials exists.
 const DIAL = DIALS[A.dial]
 const P4CAP = 3 // fixed on every dial (spec §5 Pass 4)
 
