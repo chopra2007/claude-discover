@@ -1,39 +1,63 @@
 # discover
 
-Methodical 5-pass workflow for adding new features to existing software or automation systems with high success rate and zero redundancy. Composes existing OMC and superpowers skills via parallel multi-agent orchestration (tmux panes or native Claude Code `Agent` dispatch) — does not reinvent them.
+discover takes a feature idea for an existing project and runs it through five disciplined
+passes — map what's already there, research what's possible, cut to what's worth building,
+adversarially try to kill each idea, then produce and execute a build-ready plan. The point is
+to cut the failure rate of "throw a feature at the codebase and hope" by forcing a research and
+validation gate before any code gets written.
 
-The point: cut the failure rate of "throw a feature at the codebase and hope" by enforcing a research and validation gate before code gets written.
+Passes 0–4 run inside Claude Code's built-in **Workflow engine**, so the heavy research keeps a
+clean context and survives crashes; Pass 5 (the actual build) runs in your normal session.
 
 ---
 
-## Quick Start
+## Requirements
 
-**Step 1 — Install via the Claude Code plugin marketplace:**
+- **Claude Code 2.1.154 or newer** (paid) — discover runs on the built-in Workflow engine, which
+  ships in that version. If it's missing, discover stops and tells you to run `claude update`.
+- **git** — for the Pass 5 commit/push step (skipped cleanly if there's no GitHub remote).
+- Nothing else is required.
+
+---
+
+## How it works
+
+There's a back room and a front desk. The **back room** is the Workflow engine: it runs many
+small helper agents in parallel, and their raw output never lands in your chat — it's written
+straight to files on disk. The **front desk** is the skill you talk to: it asks a few setup
+questions, launches each burst of passes, and relays back a short summary plus the file paths.
+Everything the run produces lives under `.claude/discover/<run-name>/`, which is the source of
+truth — the engine's own memory is a throwaway cache, so a crashed session or a slept laptop
+never loses work.
+
+| Pass | What happens |
+|------|--------------|
+| **0 — Map** | Parallel mappers read the actual source; an architect merges it into one faithful system map (skipped on a brand-new project). |
+| **1 — Research** | Researchers search real sources for candidate features, in bounded rounds that stop when a round turns up nothing new. |
+| **2 — Filter** | Candidates are ranked; anything claimed to "already exist" is independently checked against real code before it's dropped. |
+| **3 — Kill-test** | A panel of skeptics tries to disprove each idea. An idea dies only on proven, checked evidence — never a vote. |
+| **4 — Plan** | Rival planners each draft a build plan; a judge picks the winner and grafts in the best safeguards, producing one build-ready plan. |
+| **5 — Build** | In your main session: implement in a loop until the plan's checklist passes, run a real probe for every feature, then (with your OK) commit. |
+
+The kill-test is the core idea: a skeptic can only kill a feature by citing evidence it actually
+inspected this run (a file and line, a command's output, a fetched page), and an advocate gets to
+defend before a judge re-checks that evidence and rules. One proven fatal objection kills — there
+is no majority vote.
+
+---
+
+## Install
 
 ```
 /plugin marketplace add https://github.com/chopra2007/claude-discover
 /plugin install discover
 ```
 
-**Step 2 — Reload plugins:**
-
-```
-/reload-plugins
-```
-
-**Step 3 — Use it:**
-
-```
-discover: add reddit sentiment scoring to the trade idea bot
-```
-
-That's it.
-
 ---
 
-## Triggers
+## Usage
 
-The skill activates on one of three explicit forms:
+discover is heavyweight, so it only activates on an explicit trigger:
 
 | Trigger | Example |
 |---------|---------|
@@ -41,105 +65,86 @@ The skill activates on one of three explicit forms:
 | Message starting with `discover:` | `discover: add CSV export` |
 | The literal phrase **"discover skill"** | `use the discover skill to add wallet attribution` |
 
-It will NOT activate on plain "add a feature", "build me X", "extend my system", etc. The trigger is intentionally narrow because this is a heavyweight workflow.
+Extra sub-commands:
+
+- `discover: <name>` — resume a run where it left off.
+- `discover: build <name>` — build a plan you saved earlier (Plan-only style).
+- `discover: recheck` — re-scan for optional boosters.
+- `discover: <name> budget=N` — power-user cap on how many Claude tokens the run may spend.
+
+It will NOT activate on plain "add a feature", "build me X", or "improve my system" — the trigger
+is intentionally narrow.
 
 ---
 
-## What it does
+## The three setup questions
 
-| Pass | What happens | Output |
-|------|--------------|--------|
-| **0** — System Analysis | Parallel `explore` agents map the existing codebase; `architect` synthesizes a system map | `pass-0-system-map.md` |
-| **1** — External Research | `external-context` + `sciomc` (and optional `superpowers:brainstorming`) gather candidate features from real-world sources | `pass-1-candidates.md` |
-| **2** — Filter & Prioritize | `analyst` removes redundancy vs Pass 0; `critic` identifies failure modes; rank by quality/edge/feasibility | `pass-2-filtered.md` |
-| **3** — Adversarial + Cross-Model | `critic` + `security-reviewer` adversarial pass, then `ccg` (Claude-Codex-Gemini) cross-model synthesis with agreement matrix | `pass-3-stress-tested.md` |
-| **4** — Implementation Plan | `ralplan` consensus loop produces a build-ready plan; emits a kickoff prompt | `final-plan.md` + `EXECUTE.md` |
-| **5** — Execution (separate session) | Paste kickoff prompt in a fresh session → `ralph` loop → executor + test-engineer + verifier → flip feature flags + restart service → direct commit + push to current branch | `pass-5-execution-log.md` |
+discover asks these once, at the start, and never guesses them for you:
 
-All artifacts live in `.claude/discover/<run-name>/` so the workflow survives context compaction or terminal restarts.
-
----
-
-## Setup options the skill asks at start
-
-- **Run name** — short kebab-case slug (e.g. `reddit-sentiment`, `csv-export`) that becomes the directory name at `.claude/discover/<run-name>/` where every artifact for this run lives: `state.json`, the per-pass markdown files, and `EXECUTE.md`. It's also the **resume key** — if your terminal dies or context compacts mid-run, re-invoking `discover:` with the same name picks up where it left off. And `EXECUTE.md` (the prompt you paste into a fresh session for Pass 5) embeds the absolute path that includes this slug, so renaming after the run starts is awkward. The skill auto-suggests one from your feature description; you can confirm or correct it.
-- **Mode** — pause-for-review after each pass, OR run all 5 autonomously
-- **Layout type** — tmux (separate terminal panes) or native (Claude Code's built-in parallel `Agent` dispatch, no tmux required)
-- **Agent count** — how many parallel agents to use (suggested: 2–6). More agents = faster research passes but higher token cost. With fewer agents, the orchestrator combines roles sequentially in shared slots.
+- **Run name** — a short kebab-case slug (e.g. `reddit-sentiment`). It becomes the folder at
+  `.claude/discover/<run-name>/` where every artifact lives, and it's the key you re-use to
+  resume if the session dies.
+- **Thoroughness** — how hard it digs, and roughly what it costs:
+  - **Light** — a quick sweep (2 mappers, 2 research rounds, 2 skeptics, 1 plan); small token spend.
+  - **Standard** (default) — the balanced middle (3 mappers, 3 rounds, 3 skeptics, 2 rival plans).
+  - **Deep** — exhaustive (5 mappers, up to 5 rounds, 5 skeptics, 3 rival plans); can eat a large
+    chunk of a 5-hour usage window.
+- **Run style** — **Hands-off** (passes 0–4 straight through, then build after one OK on the plan),
+  **Checkpoints** (review the shortlist, any kills, and the plan before the build), or **Plan-only**
+  (stop at the plan; build it later with `discover: build <name>`).
 
 ---
 
-## Greenfield handling
+## Optional boosters
 
-If `discover` detects fewer than ~10 source files in the project, it auto-degrades to a 4-pass mode (skips Pass 0 — there's nothing to analyze). It tells you this is happening so you can override if you want.
+discover works with nothing but Claude Code. If any of these are installed, it uses them; if not,
+it silently falls back to the built-in path. The difference between *absent* and *broken* matters:
+an absent tool is used silently; a **broken** one (installed but, say, logged out) gets a loud
+warning before any work starts, with the exact fix.
 
----
+| Booster | What it adds | If absent |
+|---------|--------------|-----------|
+| **OMC** (Oh My ClaudeCode) | ralph's loop-until-verified build in Pass 5 | Built-in implement→verify loop |
+| **superpowers** | the verification-before-completion gate | Built-in fresh-verifier check |
+| **Codex CLI** | a second AI family's opinion in the kill-test | Single-family panel (labelled as such) |
+| **Gemini CLI** | a second AI family's opinion in the kill-test | Single-family panel (labelled as such) |
 
-## Pass 5 semantics
-
-"Live and ready to go" in this skill means: code in, tests pass, feature flags flipped, running service restarted/reloaded so the new feature is firing on the local box. It does NOT mean a full prod-deploy pipeline. If your prod is a different machine, you'll need to handle that separately.
-
-Git push: direct to the current branch, no PR flow. If you want PR-based review, use `git-master` manually after Pass 5 completes.
-
----
-
-## Prerequisites
-
-- **Claude Code** CLI
-- **tmux** — optional; required only for the tmux layout. The native layout uses Claude Code's built-in parallel `Agent` dispatch and works without tmux.
-- **OMC (Oh My ClaudeCode)** — required for `ralplan`, `ccg`, `ralph`, `external-context`, `sciomc`, and the agent system. Install via `/plugin marketplace add https://github.com/Yeachan-Heo/oh-my-claudecode` then `/plugin install oh-my-claudecode`.
-- **superpowers** plugin (optional) — for Pass 1 ideation via `brainstorming`, and Pass 5 verification gate
-- **git** — needed for Pass 5 commit/push (skipped if no GitHub remote)
-
-The skill checks these at startup and tells you what's missing before doing anything destructive.
+Cross-model opinions are **advisory only — never a vote**. They can flag a disputed kill for you
+to decide; they can't overturn one on their own.
 
 ---
 
-## Repository structure
+## What you'll be shown
 
-```
-.
-├── .claude-plugin/
-│   ├── marketplace.json     # marketplace catalog
-│   └── plugin.json          # plugin manifest
-├── skills/
-│   └── discover/
-│       ├── SKILL.md         # main 5-pass workflow instructions
-│       ├── discover.sh      # tmux session helper (--layout 2|3|4|5|6)
-│       └── references/
-│           ├── tmux-layout.md
-│           ├── pass-templates.md
-│           └── kickoff-prompt.md
-├── README.md
-└── LICENSE
-```
-
-This is a single-plugin marketplace — the same repo serves as both the marketplace catalog and the plugin source.
+- A one-line booster status before any work (and the exact fix for anything broken).
+- After every burst: a plain-language summary and the file paths — never a wall of raw agent output.
+- A `drops-log.md` where every dropped idea has a reason and an evidence pointer — nothing vanishes silently.
+- A kill report with symmetric detail: why each idea died *and* the strongest objection each survivor beat.
+- Any decision that's genuinely yours (e.g. a kill one AI family disputes) surfaced explicitly.
 
 ---
 
-## Alternative install (without the marketplace flow)
+## Costs & limits
 
-If you don't want to use the plugin marketplace, you can still install the skill directly:
+- Thoroughness ≈ spend: Light is cheap, Deep can be a large chunk of a 5-hour window.
+- The budget breaker meters **Claude tokens only** — Codex/Gemini CLI calls are not counted against it.
+- Parallelism is capped at your machine's cores minus 2. More cores = faster, not more thorough.
 
-```bash
-git clone https://github.com/chopra2007/claude-discover.git
-cp -r claude-discover/skills/discover ~/.claude/skills/
-chmod +x ~/.claude/skills/discover/discover.sh
-```
+---
 
-Then it's available as a regular skill (no marketplace involvement).
+## Tested on
+
+Linux and macOS. Windows is untested.
+
+---
+
+## Changelog
+
+- **1.0.0** — Rebuilt on Claude Code's built-in Workflow engine. tmux removed; boosters are now
+  fully optional. New evidence-rule kill-test, plan tournament, and cross-run outcome memory.
 
 ---
 
 ## License
 
 MIT
-
----
-
-## Inspired by
-
-- [Oh My ClaudeCode](https://github.com/Yeachan-Heo/oh-my-claudecode) — the agent and workflow primitives this skill composes
-- [Superpowers](https://github.com/obra/superpowers) — the brainstorming pattern used optionally in Pass 1
-- The 4-pass adversarial-discovery pattern, extended with a 5th execution pass and `ccg` cross-model synthesis

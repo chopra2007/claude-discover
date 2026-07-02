@@ -1,7 +1,7 @@
 {
   "name": "discover",
-  "version": "0.1.0",
-  "description": "Methodical 5-pass workflow for adding new features to existing software or automation systems with high success rate and zero redundancy. Composes OMC and superpowers skills via tmux multi-agent orchestration.",
+  "version": "1.0.0",
+  "description": "Methodical 5-pass feature-discovery workflow on Claude Code's built-in Workflow engine: system mapping, bounded research, evidence-rule kill-testing, plan tournament, verified execution. No required dependencies; OMC/superpowers/Codex/Gemini are optional boosters.",
   "author": {
     "name": "chopra2007"
   },
@@ -12,7 +12,7 @@
     "workflow",
     "feature-development",
     "multi-agent",
-    "tmux",
+    "workflow-engine",
     "orchestration",
     "automation",
     "ralplan",

@@ -9,8 +9,8 @@
     {
       "name": "discover",
       "source": "./",
-      "description": "Methodical 5-pass workflow for adding new features to existing software or automation systems. Triggers on /discover, discover:, or the phrase 'discover skill'. Orchestrates Pass 0 (system analysis), Pass 1 (external research), Pass 2 (filter/prioritize), Pass 3 (adversarial + ccg cross-model synthesis), Pass 4 (ralplan implementation plan), Pass 5 (autonomous execution + verification + git push).",
-      "version": "0.1.0",
+      "description": "Methodical 5-pass feature-discovery workflow on Claude Code's built-in Workflow engine: system mapping, bounded research, evidence-rule kill-testing, plan tournament, verified execution. No required dependencies; OMC/superpowers/Codex/Gemini are optional boosters.",
+      "version": "1.0.0",
       "author": {
         "name": "chopra2007"
       },
@@ -19,11 +19,11 @@
         "workflow",
         "feature-development",
         "multi-agent",
-        "tmux",
+        "workflow-engine",
         "discovery"
       ],
       "homepage": "https://github.com/chopra2007/claude-discover"
     }
   ],
-  "version": "0.1.0"
+  "version": "1.0.0"
 }
