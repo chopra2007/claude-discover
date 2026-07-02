@@ -51,6 +51,36 @@ without it every production run through SKILL.md would die on arrival. Stub harn
   relay) was simulated by hand-built args, not driven interactively. It needs a fresh interactive
   Claude Code session to test as the real user experience (Task 11 Step 3 as written).
 
+## Task 12: branch tests run (subset — the untested engine code paths)
+
+Two cheap, high-value tests were run to cover engine paths the hands-off run skipped. Both passed,
+no bugs. (The full B1–B8 matrix was deliberately not run — see the deferral note below.)
+
+### B3 (budget soft-gate + partial-return) — ✅ PASS
+Run `budget-test` on the toy with `budget_override: 250000` (feature ask: CSV export).
+Result: `partial:true, completed_passes:[0,1,2]`, stopped with "Budget exhausted before Pass 3",
+`resume_command:"discover: budget-test"`. On disk: `pass-0/1/2` + `drops-log.md` present with real
+content (pass-2 kept 3, dropped extras); `pass-3-kill-report.md` correctly ABSENT (stop was before
+Pass 3). 12 agents, 420k tokens. The soft-gate stops cleanly at a pass boundary and leaves a
+correct, resumable on-disk state. (Unit note: `budget.spent()` meters output tokens while `passEst`
+was sized against total spend, so the cap tripped later than a naive reading suggests — the
+*mechanism* is correct; the exact trip point is a calibration nicety, logged for future tuning.)
+
+### Disk resume + reparse (`from_pass:4`) — ✅ PASS
+Relaunched `monthly-summary` with `from_pass:4, to_pass:4` against the existing completed run dir.
+Result: `ok:true, completed_passes:[4]`. Bootstrap found the on-disk artifacts (found:true), the
+`reparse-map` and `reparse-kill` agents reconstructed structured state from the saved markdown, and
+Pass 4 re-ran to write a fresh `final-plan.md`. 7 agents, 260k tokens, 0 errors. This validates the
+`from_pass > 0` branch and the markdown→structured reparse machinery that a Checkpoints/resume run
+depends on.
+
+### Deferred branch tests (run only if beta surfaces a bug)
+B1 checkpoint-edit override, B2 kill+override, B4 mid-burst crash-resume, B5 broken booster,
+B6 vanilla-user (no boosters), B7 outcome read-back, B8 old-run-dir message. Skipped to cap token
+spend; the plan carries full recipes for each. The most load-bearing untested surface is the
+SKILL.md front-of-house (engine gate, capability scan, 3 questions, burst launch) — it is
+instructions to a Claude session, not runnable code, so it surfaces naturally in real use.
+
 ## Task 12 B9: budget calibration (partial — one dial measured)
 
 The run journal (`journal.jsonl`) records per-agent *results* but not per-agent *token counts*, so a

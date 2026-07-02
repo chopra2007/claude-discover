@@ -140,7 +140,7 @@ Linux and macOS. Windows is untested.
 
 ## Changelog
 
-- **1.0.0** — Rebuilt on Claude Code's built-in Workflow engine. tmux removed; boosters are now
+- **1.1.0** — Rebuilt on Claude Code's built-in Workflow engine. tmux removed; boosters are now
   fully optional. New evidence-rule kill-test, plan tournament, and cross-run outcome memory.
 
 ---
