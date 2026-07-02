@@ -243,5 +243,78 @@ KILL RULINGS: ${JSON.stringify(rulings)}`, { label: `xmodel:${fam}`, phase: 'Pas
   await synth('Pass 3', 'pass-3-kill-report.md', `${singleFamily ? 'LABEL PROMINENTLY AT TOP: "single-family panel - all verdicts are from one AI family; unanimity counts for less." ' : ''}Sections: KILLS (each: objection + evidence + rebuttal + judge reason + disputed_by flag), SURVIVORS (each: demerits, safeguards, near_miss - the strongest objection and its resolution, cross_family notes). Symmetric reporting is mandatory. JSON: ${JSON.stringify({ survivors, kills })}`, 'Pass 3 - Kill-test')
   return { survivors, kills }
 }
-// === Task 6: pass 4 + run dispatcher ===
-return { ok: true, partial: false, completed_passes: [], summary: 'skeleton', artifacts: [], counts: {}, decisions_needed: [], resume_command: '' }
+async function passPlan(map, survivors) {
+  phase('Pass 4 - Plan')
+  const ranked = [...survivors].sort((x, y) => x.demerits - y.demerits)
+  const chosen = ranked.slice(0, P4CAP)
+  const backlog = ranked.slice(P4CAP)
+  if (backlog.length) await synth('Pass 4', 'build-next.md', `Ranked backlog of survivors beyond the top-${P4CAP} build cap (never deleted; promotable by the human next run). JSON: ${JSON.stringify(backlog)}`, 'Pass 4 - Plan')
+  const STANCES = ['minimal-diff', 'robustness-first', 'extensibility-first'].slice(0, DIAL.rivals)
+  let rivals
+  if (DIAL.rivals > 1) {
+    const enu = await agent(`${PRE}
+Quick check: for integrating ${JSON.stringify(chosen.map(c => c.name))} into this system (map: ${JSON.stringify(map.components)}), how many MATERIALLY DISTINCT architectures exist? Distinct = different integration points or data flow, not different polish.`, { label: 'approach-enum', phase: 'Pass 4 - Plan', schema: S_APPROACHES, model: 'haiku' })
+    if (enu && enu.distinct_architectures < 2) { log('approach space is narrow - tournament skipped, single plan'); rivals = [STANCES[0]] } else rivals = STANCES
+  } else rivals = [STANCES[0]]
+  const planPrompt = stance => `${PRE}
+You are the ${stance} planner. Produce a build-ready plan integrating the features below into the existing system without duplicating anything. Your assigned stance - optimize for: ${stance === 'minimal-diff' ? 'the smallest correct change; touch the fewest files' : stance === 'robustness-first' ? 'failure handling, safeguards, and observability' : 'clean seams for future features'}. READ the actual integration-point code before naming file paths or signatures. Every plan section required. EVERY feature needs a probe: live_probe {instruction: exact command/action, expected_evidence: what output proves it works} or deferred_probe {reason from ${PROBE_REASONS.join('/')}, owed_check}. destructive_or_costly REQUIRES a dry-run analog in instruction.
+FEATURES (with safeguards to bake in): ${JSON.stringify(chosen)}
+SYSTEM MAP: ${JSON.stringify(map)}`
+  const plans = (await parallel(rivals.map(s => () => agent(planPrompt(s), { label: `plan:${s}`, phase: 'Pass 4 - Plan', schema: S_PLAN })))).filter(Boolean)
+  let final = plans[0], judge = null
+  if (plans.length > 1) {
+    judge = await agent(`${PRE}
+You are the single tournament judge. Rubric per plan, scored 1-10 each, in isolation first: buildability (are named files/functions real - GREP THE CODE for each plan's claimed integration points, record findings in grounded_findings), completeness (all sections + probes), risk handling, fit-to-stance. Then ONE comparative pass -> winner_stance. graft_list: ONLY additive items from losers (allowed target sections: Failure Handling / Feature Activation Plan / Verification Checklist / tests / risk-callouts). Structural superiority of a loser => either declare it winner or put ONE bounded instruction in revision_order - structural ideas are NEVER grafted.
+PLANS: ${JSON.stringify(plans)}`, { label: 'tournament-judge', phase: 'Pass 4 - Plan', schema: S_JUDGE })
+    const winner = plans.find(p => p.stance === judge.winner_stance) || plans[0]
+    final = await agent(`${PRE}
+You are the plan reviser. Re-generate the winning plan as ONE coherent whole: apply the graft list (additive items only, into their target sections)${judge.revision_order ? ' and this single structural revision: ' + judge.revision_order : ''}. Do not import any other loser ideas.
+WINNER: ${JSON.stringify(winner)}
+GRAFTS: ${JSON.stringify(judge.graft_list)}`, { label: 'plan-reviser', phase: 'Pass 4 - Plan', schema: S_PLAN })
+    const co = await agent(`${PRE}
+Coherence check on the merged plan: contradictions between sections, grafted items that don't fit, features without probes. Fix what you find and report fixes_applied. PLAN: ${JSON.stringify(final)}`, { label: 'coherence-check', phase: 'Pass 4 - Plan', schema: S_COHERE })
+    if (co && co.fixes_applied.length) log(`coherence pass applied ${co.fixes_applied.length} fixes`)
+  }
+  await synth('Pass 4', 'final-plan.md', `The build spec Pass 5 reads. Render all 8 sections in order, then a "Feature Probes" section listing every feature's probe verbatim, then (if a tournament ran) "Tournament notes": scores table, grounded_findings, graft decisions, losing-plan one-line summaries. plan=${JSON.stringify(final)} judge=${JSON.stringify(judge)}`, 'Pass 4 - Plan')
+  if (A.run_style === 'planonly') await synth('Pass 4', 'EXECUTE.md', `Separate-session kickoff per references/kickoff-prompt.md template: run name ${A.name}, absolute plan path ${A.run_dir}/final-plan.md, activation summary from the plan's Feature Activation Plan section, and the one-line resume trigger "discover: build ${A.name}".`, 'Pass 4 - Plan')
+  return { plan_path: `${A.run_dir}/final-plan.md` }
+}
+phase('Bootstrap')
+const boot = await bootstrap()
+const priorMap = boot.found && boot.artifacts.map ? boot.artifacts.map : ''
+const completed = []
+let map = null, candidates = null, filtered = null
+try {
+  if (A.from_pass > 0 && !boot.found) return partialReturn([], `Cannot start at pass ${A.from_pass}: no saved artifacts found in ${A.run_dir}.`)
+  if (A.from_pass === 0) {
+    if (!gate(0)) return partialReturn(completed, 'Budget too low for Pass 0.')
+    map = await passMap(); completed.push(0)
+    if (!gate(1)) return partialReturn(completed, 'Budget exhausted after Pass 0.')
+    candidates = await passResearch(map); completed.push(1)
+    if (!gate(2)) return partialReturn(completed, 'Budget exhausted after Pass 1.')
+    filtered = await passFilter(map, candidates, boot.artifacts.outcomes_prior, boot.user_edits); completed.push(2)
+  } else {
+    map = { fromDisk: true, raw: priorMap, components: [], data_sources: [], gaps: [], unverified: [] }
+    const reparse = await agent(`${PRE}\nParse this saved system-map artifact back into structured form:\n${priorMap}`, { label: 'reparse-map', phase: 'Bootstrap', schema: S_MAP, model: 'haiku' })
+    if (reparse) map = reparse
+    const refilter = await agent(`${PRE}\nParse the saved pass-2 artifact back into {kept, drops} structured form. HUMAN CHECKPOINT EDITS OVERRIDE the artifact - apply them (drop = remove from kept; note rewordings): edits=${JSON.stringify(boot.user_edits)}\nARTIFACT:\n${boot.artifacts.filtered}`, { label: 'reparse-filtered', phase: 'Bootstrap', schema: S_FILTER, model: 'haiku' })
+    filtered = refilter || { kept: [], drops: [] }
+  }
+  let survivors = null
+  if (A.to_pass >= 3 && A.from_pass <= 3) {
+    if (!gate(3)) return partialReturn(completed, 'Budget exhausted before Pass 3.')
+    const kill = await passKill(map, filtered.kept); completed.push(3)
+    survivors = kill.survivors
+  } else if (A.from_pass === 4) {
+    const rekill = await agent(`${PRE}\nParse the saved kill report back into {survivors, kills} structured form. HUMAN CHECKPOINT EDITS OVERRIDE (an overridden kill re-enters survivors WITH its objection recorded as a safeguard): edits=${JSON.stringify(boot.user_edits)}\nARTIFACT:\n${boot.artifacts.kill_report}`, { label: 'reparse-kill', phase: 'Bootstrap', schema: S_KILL, model: 'haiku' })
+    survivors = rekill ? rekill.survivors : []
+  }
+  if (A.to_pass >= 4) {
+    if (!gate(4)) return partialReturn(completed, 'Budget exhausted before Pass 4.')
+    await passPlan(map, survivors); completed.push(4)
+  }
+} catch (e) {
+  return partialReturn(completed, `A stage failed hard (${String(e).slice(0, 200)}).`)
+}
+const summary = await agent(`${PRE}\nWrite a 3-6 sentence plain-language summary of this burst for a non-coder: passes completed ${JSON.stringify(completed)}, counts ${JSON.stringify(RUNSTATE.counts)}, decisions needed ${JSON.stringify(RUNSTATE.decisions)}. Name the artifact files to look at. No jargon.`, { label: 'burst-summary', phase: completed.includes(4) ? 'Pass 4 - Plan' : 'Pass 3 - Kill-test', schema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } }, model: 'haiku' })
+return { ok: true, partial: false, completed_passes: completed, summary: summary ? summary.text : 'burst complete', artifacts: RUNSTATE.artifacts, counts: RUNSTATE.counts, decisions_needed: RUNSTATE.decisions, resume_command: '' }
