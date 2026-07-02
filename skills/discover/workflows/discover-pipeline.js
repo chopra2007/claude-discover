@@ -180,6 +180,68 @@ You are an independent redundancy verifier (you did NOT propose this drop). Clai
   await synth('Pass 2', 'pass-2-filtered.md', `Kept candidates (ranked, with failure modes, safeguards, prior-outcome notes) and the redundancy-verifier evidence. kept=${JSON.stringify(kept)} verifier_evidence=${JSON.stringify(verified.filter(Boolean).map(x => ({ name: x.d.name, verdict: x.v.verdict, evidence: x.v.evidence })))}`, 'Pass 2 - Filter')
   return { kept, drops }
 }
-// === Task 5: pass 3 ===
+async function passKill(map, kept) {
+  phase('Pass 3 - Kill-test')
+  const lenses = LENSES.slice(0, DIAL.skeptics)
+  const panel = (await parallel(lenses.map(l => () =>
+    agent(`${PRE}
+You are the ${l.key} skeptic. Try to disprove EACH candidate below through your lens ONLY. Your evidence anchor - you MUST actually do this before objecting: ${l.anchor}
+An objection is kill-eligible ONLY if all three hold: CONCRETE (trigger + mechanism + impact), GROUNDED (evidence field cites an artifact you inspected THIS run), FATAL-CLASS (exactly one of ${FATAL_CLASSES.join(' / ')}). Otherwise mark kind=concern, fatal_class=none. Do not manufacture objections - explicit endorsement is a valid result.
+SYSTEM MAP: ${JSON.stringify(map)}
+CANDIDATES: ${JSON.stringify(kept)}`, { label: `skeptic:${l.key}`, phase: 'Pass 3 - Kill-test', schema: S_SKEPTIC })))).filter(Boolean)
+  let objections = panel.flatMap(p => p.objections)
+    .map((o, i) => ({ ...o, ref: `o${i + 1}`, kind: (o.kind === 'kill-eligible' && o.evidence && o.evidence.length > 20 && FATAL_CLASSES.includes(o.fatal_class)) ? 'kill-eligible' : 'concern' }))
+  const killable = objections.filter(o => o.kind === 'kill-eligible')
+  let rulings = []
+  if (killable.length) {
+    if (!gate(3)) { objections = objections.map(o => ({ ...o, kind: 'concern', budget_flagged: true })); log('budget guard: defense cannot run - kill-eligible objections downgraded to flagged concerns (never kill without a defense)') }
+    else {
+      const defense = await agent(`${PRE}
+You are the advocate. For each kill-eligible objection below, draft the strongest honest rebuttal (tool access allowed - read the code, probe the source).
+OBJECTIONS: ${JSON.stringify(killable)}
+CANDIDATES: ${JSON.stringify(kept)}
+Return your rebuttals inside rulings with ruling=REJECTED and reason=your rebuttal (the judge will overwrite ruling).`, { label: 'advocate', phase: 'Pass 3 - Kill-test', schema: S_DEFENSE })
+      const judged = await agent(`${PRE}
+You are the judge. For each objection: FIRST re-open its cited evidence yourself (re-read the file / re-run the command / re-fetch the URL) and record what you saw in evidence_recheck. Then, weighing the advocate's rebuttal, rule UPHELD (candidate dies) / CONVERTED (becomes safeguard + demerit) / REJECTED. An objection whose evidence does not check out is REJECTED. One UPHELD objection kills - there is no vote.
+OBJECTIONS: ${JSON.stringify(killable)}
+ADVOCATE REBUTTALS: ${JSON.stringify(defense ? defense.rulings : [])}`, { label: 'judge', phase: 'Pass 3 - Kill-test', schema: S_DEFENSE })
+      rulings = judged ? judged.rulings : []
+    }
+  }
+  const killedIds = new Set(rulings.filter(r => r.ruling === 'UPHELD').map(r => r.candidate_id))
+  const singleFamily = !(DIAL.crossModel && (A.capabilities.codex === 'healthy' || A.capabilities.gemini === 'healthy'))
+  let xnotes = []
+  if (!singleFamily) {
+    const unanimousKills = kept.filter(k => killedIds.has(k.id))
+    const survivors = kept.filter(k => !killedIds.has(k.id))
+    const batch = survivors.concat(unanimousKills).slice(0, 8)
+    const families = [['codex', 'timeout 240 codex exec'], ['gemini', 'GEMINI_CLI_TRUST_WORKSPACE=true timeout 240 gemini -p']].filter(([f]) => A.capabilities[f] === 'healthy')
+    xnotes = (await parallel(families.map(([fam, cli]) => () =>
+      agent(`${PRE}
+You are the cross-model auditor for ${fam}. Compose ONE batched prompt covering all ideas below (include the panel's evidence per idea; for killed ideas attach the kill's failure scenario and ask "is this stated failure scenario factually correct for this system?"). Run it via bash: ${cli} "<your prompt>" . If the CLI errors or times out, return available=false. Parse the reply into per-candidate notes: endorse / dissent (for survivors) / dispute-kill (for killed ones). Advisory only - you are NOT a vote.
+IDEAS: ${JSON.stringify(batch)}
+KILL RULINGS: ${JSON.stringify(rulings)}`, { label: `xmodel:${fam}`, phase: 'Pass 3 - Kill-test', schema: S_XMODEL })))).filter(Boolean).filter(x => x.available)
+  }
+  const survivors = kept.filter(k => !killedIds.has(k.id)).map(k => {
+    const mine = objections.filter(o => o.candidate_id === k.id)
+    const conv = rulings.filter(r => r.candidate_id === k.id && r.ruling === 'CONVERTED')
+    const strongest = mine[0]
+    return { id: k.id, name: k.name, demerits: mine.filter(o => o.kind === 'concern').length + conv.length,
+      safeguards: (k.safeguards || []).concat(mine.filter(o => o.kind === 'concern').map(o => `guard against: ${o.trigger}`)),
+      near_miss: strongest ? `${strongest.lens}: ${strongest.trigger} -> resolved: ${rulings.find(r => r.objection_ref === strongest.ref)?.reason || 'concern, safeguard attached'}` : 'no objections raised',
+      cross_family: xnotes.flatMap(x => x.notes.filter(n => n.candidate_id === k.id && n.stance === 'dissent').map(n => `${x.family} dissent: ${n.note}`)).join('; ') }
+  })
+  const kills = kept.filter(k => killedIds.has(k.id)).map(k => {
+    const r = rulings.find(x => x.candidate_id === k.id && x.ruling === 'UPHELD')
+    const o = objections.find(x => x.ref === r.objection_ref) || {}
+    return { id: k.id, name: k.name, objection: `${o.lens}: ${o.trigger} -> ${o.mechanism} -> ${o.impact}`, evidence: o.evidence || '', rebuttal: r.reason, judge_reason: `${r.reason} | recheck: ${r.evidence_recheck}`,
+      disputed_by: xnotes.flatMap(x => x.notes.filter(n => n.candidate_id === k.id && n.stance === 'dispute-kill').map(n => x.family)).join(',') }
+  })
+  RUNSTATE.counts.kills = kills.length; RUNSTATE.counts.survivors = survivors.length
+  kills.filter(k => k.disputed_by).forEach(k => RUNSTATE.decisions.push(`kill of "${k.name}" disputed by ${k.disputed_by} - human decision (see kill report)`))
+  await appendDrops(kills.map(k => ({ name: k.name, stage: 'pass-3', code: 'kill-upheld', reason: k.objection, evidence: k.evidence })), 'Pass 3 - Kill-test')
+  await synth('Pass 3', 'pass-3-kill-report.md', `${singleFamily ? 'LABEL PROMINENTLY AT TOP: "single-family panel - all verdicts are from one AI family; unanimity counts for less." ' : ''}Sections: KILLS (each: objection + evidence + rebuttal + judge reason + disputed_by flag), SURVIVORS (each: demerits, safeguards, near_miss - the strongest objection and its resolution, cross_family notes). Symmetric reporting is mandatory. JSON: ${JSON.stringify({ survivors, kills })}`, 'Pass 3 - Kill-test')
+  return { survivors, kills }
+}
 // === Task 6: pass 4 + run dispatcher ===
 return { ok: true, partial: false, completed_passes: [], summary: 'skeleton', artifacts: [], counts: {}, decisions_needed: [], resume_command: '' }
