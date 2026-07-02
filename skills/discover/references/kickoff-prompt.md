@@ -1,6 +1,9 @@
-# Kickoff Prompt Template — Pass 5
+# Kickoff Prompt Template — Pass 5 (Plan-only handoff)
 
-This is the template the orchestrator fills in at the end of Pass 4 and writes to `EXECUTE.md`. The user types a **single short line** into a fresh Claude Code session to start Pass 5 — they do NOT paste the contents of `EXECUTE.md`. The skill reads `EXECUTE.md` from disk when it re-activates.
+This is the template the Pass 4 synthesizer fills in and writes to `EXECUTE.md` when the run
+style is **Plan-only**. The user types a **single short line** into a fresh Claude Code session
+to start the build — they do NOT paste the contents of `EXECUTE.md`. The skill reads `EXECUTE.md`
+from disk when it re-activates.
 
 ## What to write to EXECUTE.md
 
@@ -10,28 +13,26 @@ Replace the placeholders below before writing the file:
 - `{{RUN_DIR}}` — absolute path to `.claude/discover/<run-name>/`
 - `{{PLAN_PATH}}` — absolute path to `final-plan.md`
 - `{{ACTIVATION_SUMMARY}}` — one-sentence summary of what flipping the feature on entails (e.g. "set `enable_reddit_sentiment: true` and restart `tradebot.service`")
-- `{{GIT_REMOTE}}` — the result of `git remote get-url origin 2>/dev/null` or `(no remote configured)`
 
 ## Template (written to EXECUTE.md)
 
 ```
 # discover — Pass 5 context for run: {{RUN_NAME}}
-# Loaded automatically when the user runs: discover: resume {{RUN_NAME}}
+# Loaded automatically when the user runs: discover: build {{RUN_NAME}}
 
 RUN_NAME={{RUN_NAME}}
 RUN_DIR={{RUN_DIR}}
 PLAN_PATH={{PLAN_PATH}}
 ACTIVATION={{ACTIVATION_SUMMARY}}
-GIT_REMOTE={{GIT_REMOTE}}
 
 ## Instructions for the skill (Pass 5)
 
 1. Read `final-plan.md` at {{PLAN_PATH}} and `state.json` in {{RUN_DIR}}. If anything is missing or contradictory, ask once and stop.
-2. Use `/oh-my-claudecode:ralph` to implement the plan, looping until the verification checklist in section 8 of the plan passes. Inside ralph: executor for code, test-engineer for tests, verifier for the checklist.
-3. Once verification passes, perform the Feature Activation Plan from section 7: flip the config flags, restart/reload the running service, tail logs for 30s, confirm the new feature is firing.
-4. Invoke `superpowers:verification-before-completion` — confirm the checklist is fully satisfied before committing.
-5. If a GitHub remote exists ({{GIT_REMOTE}}), stage all changes, commit with a message summarizing the feature(s) added (reference the run name), and push directly to the current branch. No PR. If push fails, surface the error and stop.
-6. Append a final report to `pass-5-execution-log.md` covering: files changed, test results, activation log excerpts, commit SHA, push status, and any issues.
+2. Implement in a loop until the plan's Verification Checklist passes. If OMC's ralph is present and healthy, use it; otherwise run the built-in loop (implement → test → a FRESH verifier agent, never the implementer, checks the checklist → fix → repeat).
+3. PROBE GATE — before any commit, run every probe in the plan's Feature Probes section: a live_probe is executed and its real output compared to the expected evidence; a deferred_probe first has its named prerequisite verified as genuinely absent (a deferral with a present prerequisite is void — run it). Record every result in `pass-5-execution-log.md`.
+4. ASK BEFORE COMMIT — one message enumerating every probe (✅ ran, with a one-line evidence note / ⏸ deferred, with the reason). Wait for the user's OK. Then commit; push only if a github remote exists (skip with a note otherwise). On push failure, surface the exact next step — never force-push.
+5. Write `outcome.json` to {{RUN_DIR}}: every candidate that entered the kill-test, with its verdict (shipped + commit SHA / killed + reason / deferred + reason).
+6. Append a final report to `pass-5-execution-log.md`: files changed, test results, probe evidence, commit SHA, push status, and any open issues.
 
 Only ask for input on real ambiguity:
 - Plan-vs-reality structural mismatch
@@ -42,7 +43,7 @@ Only ask for input on real ambiguity:
 Otherwise, plow through.
 ```
 
-## What the user sees in chat (at the end of Pass 4)
+## What the user sees in chat (at the end of Pass 4, Plan-only)
 
 Print this — and only this — to the chat as the kickoff instruction. Do NOT ask the user to copy-paste `EXECUTE.md`'s contents.
 
@@ -53,10 +54,10 @@ Print this — and only this — to the chat as the kickoff instruction. Do NOT 
 
 Open a fresh Claude Code session and type:
 
-    discover: resume {{RUN_NAME}}
+    discover: build {{RUN_NAME}}
 
 The skill will re-activate and read EXECUTE.md from disk.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-The leading `discover:` ensures the skill re-activates in the new session and recognizes this as a Pass 5 resume rather than a fresh run. The `EXECUTE.md` file is the context; the one-liner is the trigger.
+The leading `discover:` ensures the skill re-activates in the new session and recognizes this as a Pass 5 build rather than a fresh run. The `EXECUTE.md` file is the context; the one-liner is the trigger.

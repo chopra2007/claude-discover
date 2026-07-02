@@ -1,184 +1,105 @@
-# Pass Output Templates
+# Artifact inventory — the run directory
 
-Use these as scaffolding when writing each pass file. Adapt section depth to the project's complexity — a small bot doesn't need 20 components in the system map.
+Every discover run keeps all its work under `.claude/discover/<run-name>/`. That folder is the
+source of truth: it survives a crashed session, a slept laptop, or a context compaction. The
+Workflow engine's own memory is a throwaway cache — only these files are permanent.
 
----
-
-## `pass-0-system-map.md`
-
-```markdown
-# Pass 0 — System Map: <project-name>
-
-_Generated: <ISO timestamp> · Run: <run-name>_
-
-## Component Inventory
-| Component | File(s) | Purpose | Verified? |
-|-----------|---------|---------|-----------|
-| ... | ... | ... | yes / inferred |
-
-## Data Sources
-- <source>: <description>, <how it's accessed>
-
-## Pipeline / Data Flow
-<text or mermaid diagram showing input → processing → output>
-
-## Strengths
-- ...
-
-## Gaps (verified absences only)
-- ...
-
-## Notes
-- Anything inferred but unverified, edge cases noticed, etc.
-```
+This file lists every artifact, who writes it, and roughly what goes in it. The *shapes* of the
+structured data live in the pipeline script (`workflows/discover-pipeline.js`) — this file does
+not repeat them, so the two can never drift.
 
 ---
 
-## `pass-1-candidates.md`
+## `state.json` — the run's control record
+- **Written by:** the main session (SKILL.md), at startup and after every burst.
+- **When:** created in startup step 6; updated after each Workflow burst returns.
+- Holds `format_version: 2`, the run name, the thoroughness dial, the run style, the created
+  timestamp, which pass is current, the list of bursts run so far (from/to/ok/partial), and the
+  booster status line. This is what a resume reads first to know where the run left off.
 
-```markdown
-# Pass 1 — Candidate Features
+## `pass-0-system-map.md` — what already exists
+- **Written by:** the Pass 0 synthesizer (inside the engine).
+- **When:** the moment Pass 0 finishes (skipped entirely on a greenfield project).
+- A plain-language inventory of the current system: each component and what it does, the data
+  sources in use, the real gaps (only things truly absent), and a separate "inferred but not
+  verified" list for anything guessed from a filename rather than read.
 
-_Run: <run-name> · Mode: <pause-for-review | autonomous>_
+## `pass-1-candidates.md` — the wide net
+- **Written by:** the Pass 1 synthesizer.
+- **When:** the moment research finishes (bounded rounds, stops when a round finds nothing new).
+- The full, unfiltered list of candidate features. Each one names its function, why it's worth
+  considering for *this* system, its source quality (high / medium / low), and the sources.
 
-## Feature: <name>
-- **Function:** what it does
-- **Rationale:** why it matters for this system
-- **Source category:** High / Medium / Low signal
-- **Source citations:** <links or paper refs>
+## `pass-2-filtered.md` — the shortlist
+- **Written by:** the Pass 2 synthesizer.
+- **When:** after the filter ranks candidates and an independent verifier checks any "already
+  exists" claims against real code.
+- The kept candidates, ranked, each with its failure modes, the safeguards to bake in, and any
+  note from a prior run's outcome. Includes the redundancy-verifier's evidence for anything it
+  confirmed or rescued.
 
-(Repeat for each candidate — no filtering yet, that's Pass 2.)
+## `drops-log.md` — nothing disappears silently
+- **Written by:** the drop-logger (appended to by any pass that cuts something).
+- **When:** every time a candidate is dropped, in any pass.
+- One bullet per dropped candidate: its name, the stage and reason-code, the plain reason, and
+  the evidence pointer. This is the audit trail — the user can always see why an idea is gone.
 
-## Research Notes
-- Open questions
-- Assumptions worth flagging
-```
+## `pass-3-kill-report.md` — the adversarial verdict
+- **Written by:** the Pass 3 synthesizer.
+- **When:** after the skeptic panel, the advocate defense, and the judge finish.
+- Two symmetric sections. KILLS: each killed idea with the objection, the evidence, the
+  advocate's rebuttal, the judge's reason, and whether a cross-model family disputed the kill.
+  SURVIVORS: each with its demerits, safeguards, the strongest objection it faced and how that
+  resolved, and any cross-family note. A single-family panel is labelled prominently at the top.
 
----
+## `build-next.md` — the backlog
+- **Written by:** the Pass 4 synthesizer.
+- **When:** only when more survivors passed the kill-test than the build cap (top 3).
+- The ranked survivors beyond the build cap. Never deleted — the human can promote one into the
+  next run.
 
-## `pass-2-filtered.md`
+## `final-plan.md` — the build spec
+- **Written by:** the Pass 4 synthesizer.
+- **When:** at the end of Pass 4.
+- The build-ready plan Pass 5 reads: all eight required sections in order (System Overview,
+  Component Architecture, Data Flow Pipeline, Data Structures, Integration Plan, Failure
+  Handling, Feature Activation Plan, Verification Checklist), then a "Feature Probes" section
+  with every feature's probe verbatim, then (if a plan tournament ran) the tournament notes.
 
-```markdown
-# Pass 2 — Filtered & Prioritized Features
+## `EXECUTE.md` — the separate-session kickoff (Plan-only runs)
+- **Written by:** the Pass 4 synthesizer, only in Plan-only run style.
+- **When:** at the end of Pass 4 when the user chose to stop at the plan.
+- The one-screen handoff a fresh session reads: run name, absolute path to `final-plan.md`, a
+  short activation summary, and the one-line trigger `discover: build <name>`.
 
-_Run: <run-name>_
+## `checkpoint-edits.md` — the human's overrides
+- **Written by:** the main session, at any review checkpoint.
+- **When:** whenever the user changes something at a shortlist / kill / plan review.
+- The user's decisions, verbatim, under a dated heading ("drop candidate 3", "overrule that
+  kill of X"). The next burst reads this and applies it literally — an overruled kill re-enters
+  planning with its objection attached as a safeguard.
 
-## Removed (and why)
-- <feature>: already in Pass 0 / unreliable / low impact / other
+## `outcome.json` — how discover remembers
+- **Written by:** the main session, at the end of Pass 5.
+- **When:** after the build finishes.
+- Shape:
+  ```json
+  {
+    "run": "<run-name>",
+    "closed": "<date>",
+    "candidates": [
+      { "name": "<feature>", "verdict": "shipped", "detail": "<commit SHA>" },
+      { "name": "<feature>", "verdict": "killed",  "detail": "<short kill reason>" },
+      { "name": "<feature>", "verdict": "deferred","detail": "<deferral reason>" }
+    ]
+  }
+  ```
+  Every candidate that entered Pass 3 gets a verdict. Future runs on this repo read every
+  `outcome.json` and surface the prior verdicts next to matching candidates — but never
+  auto-drop because of them (reasons go stale).
 
-## Final Set
-
-### Feature: <name> — Rank: <1-N>
-- **Function:**
-- **Rationale:**
-- **Failure modes:** false signals, manipulation, latency, crowding, ...
-- **Safeguards:** confirmation logic, thresholds, weighting, ...
-- **Implementation notes:** practical approach, dependencies
-- **Signal quality / Edge / Feasibility:** <H/M/L for each>
-
-(Repeat per surviving feature.)
-```
-
----
-
-## `pass-3-stress-tested.md`
-
-```markdown
-# Pass 3 — Adversarial Stress Test + Cross-Model Synthesis
-
-_Run: <run-name>_
-
-## Local Adversarial Review
-### Feature: <name>
-- **Attack vectors found:** ...
-- **Strengthened how:** ...
-- **Removed?** yes / no / conditional
-
-## Security Review (where applicable)
-- ...
-
-## Cross-Model Synthesis (ccg)
-
-### Agreement Matrix
-| Feature | Claude | Codex | Gemini | Consensus |
-|---------|--------|-------|--------|-----------|
-| ... | keep | keep | drop | 2/3 keep — flag |
-
-### Disagreements worth surfacing
-- <feature>: model X said keep because Y, model Z said drop because W
-
-### Single-model-support flags
-- Features only one model defended — these are higher-risk; user should call.
-
-## Final Refined Set
-- ...
-
-## Realistic Edge
-- What these features actually improve, in concrete terms.
-
-## Explicit Limitations
-- What they don't solve.
-```
-
----
-
-## `final-plan.md` (Pass 4 output)
-
-```markdown
-# Implementation Plan — <run-name>
-
-_Generated by ralplan + discover orchestrator · <ISO timestamp>_
-
-## 1. System Overview
-How the new features fit into the existing system. Reference Pass 0 component map.
-
-## 2. Component Architecture
-### Module: <name>
-- **Purpose:**
-- **Inputs:**
-- **Outputs:**
-- **Core logic:**
-- **Dependencies:**
-
-(Repeat per new module.)
-
-## 3. Data Flow Pipeline
-Step-by-step flow with new components highlighted. Mermaid or numbered list.
-
-## 4. Data Structures
-```python
-# or whatever the project's language is
-class NewSignal:
-    ticker: str
-    score: float
-    source: Literal["reddit", "twitter", "news"]
-    timestamp: datetime
-```
-
-## 5. Integration Plan
-Exact connection points with existing code:
-- Modify `src/pipeline.py:run_pipeline()` — add call to `<new_module>` between lines X and Y
-- New config keys in `config/default.yaml`: `enable_<feature>: true`, `<feature>_threshold: 0.7`
-- New env vars: `<FEATURE>_API_KEY` (optional, falls back to free tier)
-
-## 6. Failure Handling
-- Missing data: <behavior>
-- Delayed data: <behavior>
-- Conflicting data: <resolution rule>
-- Service unreachable: <fallback>
-
-## 7. Feature Activation Plan
-Once code is in:
-- Set `enable_<feature>: true` in `config/default.yaml`
-- Reload: `systemctl restart <service>` (or: `pm2 reload`, hot-reload, etc.)
-- Confirm: tail logs for 30s, grep for `<feature>` initialization message
-
-## 8. Verification Checklist
-Pass 5 must satisfy ALL of these before declaring success:
-- [ ] All new tests pass
-- [ ] Existing test suite still green
-- [ ] Service starts cleanly with new config
-- [ ] Log output shows new feature firing within 60s of restart
-- [ ] No new error-level log lines in first 5 minutes
-- [ ] (per-feature concrete check)
-```
+## `pass-5-execution-log.md` — the build record
+- **Written by:** the main session, during and after Pass 5.
+- **When:** as the build runs.
+- Files changed, test results, the actual probe output for every feature, the commit SHA and
+  push status, and any open issues.

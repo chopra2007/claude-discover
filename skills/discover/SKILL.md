@@ -92,7 +92,35 @@ budget_override (from `budget=N` or null), free_data_only (true unless the user 
 - `discover: <name>` — read `state.json`, continue from `current_pass` / the next burst.
 - `discover: build <name>` — skip to Pass 5 using the saved `final-plan.md` (+ `EXECUTE.md` if present).
 
-<!-- PASS5 -->
+## Pass 5 — Build (main session)
+
+1. **Read context:** `final-plan.md` + `state.json` (+ `EXECUTE.md` for `discover: build`).
+2. **Implement in a loop until the Verification Checklist passes.** If OMC's ralph is present
+   and healthy, use it with the directive: "Execute the implementation plan at <abs>/final-plan.md.
+   Loop until the verification checklist passes." Otherwise run the built-in loop: implement →
+   test → have a FRESH verifier agent (never the implementer) check the checklist with tool
+   access → fix → repeat.
+3. **Probe gate — before any commit.** For EVERY feature in the plan's Feature Probes section:
+   - `live_probe`: execute the instruction, capture the actual output, compare to
+     expected_evidence. Record both in `pass-5-execution-log.md`.
+   - `deferred_probe`: first VERIFY the named prerequisite really is absent (e.g. grep config
+     for the credential, check the env). A deferral with a present prerequisite is void — run
+     the probe. Record the verification.
+   If `superpowers:verification-before-completion` is available, invoke it now; either way the
+   rule holds: no completion claim without fresh evidence in the same message.
+4. **Ask before commit** — one message enumerating every probe: ✅ ran (evidence one-liner) /
+   ⏸ deferred (reason). Wait for OK. Then commit; push only if a github remote exists (skip
+   with a note otherwise); on push failure surface the exact next step, never force-push.
+5. **Write `outcome.json`** to the run dir: every candidate that entered Pass 3, with verdict
+   shipped (+ commit SHA) / killed (+ short reason) / deferred (+ reason). Future runs on this
+   repo read this — it is how discover remembers.
+6. **Final report** to `pass-5-execution-log.md`: files changed, test results, probe evidence,
+   SHA + push status, open issues.
+**When to stop and ask:**
+- Plan-vs-reality mismatch: the existing code is structured differently than Pass 0's map suggested, and the integration plan no longer fits.
+- A test fails for reasons that suggest a design flaw, not a code bug. (Code bugs: keep looping. Design flaws: surface.)
+- Git remote requires interactive auth that wasn't pre-configured.
+- Service restart fails and rollback semantics aren't clear.
 
 ## Failure modes and recovery
 - Engine died / laptop slept mid-burst: artifacts exist for every completed pass; resume relaunches the burst window.
