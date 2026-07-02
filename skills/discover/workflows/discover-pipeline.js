@@ -116,7 +116,70 @@ user_edits = verbatim content of ${A.run_dir}/checkpoint-edits.md if it exists (
 function partialReturn(completed, why) {
   return { ok: false, partial: true, completed_passes: completed, summary: why + ` Everything finished so far is saved in ${A.run_dir}. Resume with the command below - completed work will not be re-paid.`, artifacts: RUNSTATE.artifacts, counts: RUNSTATE.counts, decisions_needed: RUNSTATE.decisions, resume_command: `discover: ${A.name}` }
 }
-// === Task 4: passes 0-2 ===
+async function passMap() {
+  phase('Pass 0 - Map')
+  if (A.greenfield) { log('greenfield project - Pass 0 skipped (nothing to map)'); return { components: [], data_sources: [], gaps: ['greenfield - no existing system'], unverified: [] } }
+  const views = await parallel(Array.from({ length: DIAL.mappers }, (_, i) => () =>
+    agent(`${PRE}
+You are codebase mapper ${i + 1} of ${DIAL.mappers}. Divide the repo mentally into ${DIAL.mappers} slices by top-level directory order and take slice ${i + 1}. READ the actual source files in your slice (entrypoints, core modules, config). Mark anything you did not actually read as unverified.`,
+      { label: `mapper-${i + 1}`, phase: 'Pass 0 - Map', schema: S_MAP })))
+  const merged = await agent(`${PRE}
+You are the architect. Merge these mapper inventories into ONE faithful system map (dedupe, resolve conflicts by re-reading the disputed file yourself). Keep the unverified list honest.
+MAPPER OUTPUTS: ${JSON.stringify(views.filter(Boolean))}`, { label: 'architect-merge', phase: 'Pass 0 - Map', schema: S_MAP })
+  await synth('Pass 0', 'pass-0-system-map.md', `Component inventory, data sources, gaps (only truly absent things), and an "inferred but not verified" section. JSON to render: ${JSON.stringify(merged)}`, 'Pass 0 - Map')
+  return merged
+}
+
+async function passResearch(map) {
+  phase('Pass 1 - Research')
+  const angles = ['how similar open-source systems solve this', 'academic/industry patterns and their tradeoffs', 'data sources and APIs that could power it', 'failure stories and anti-patterns from practitioners']
+  let all = []
+  let dry = 0
+  for (let round = 1; round <= DIAL.roundCap; round++) {
+    const found = await parallel(Array.from({ length: DIAL.researchers }, (_, i) => () =>
+      agent(`${PRE}
+You are researcher ${i + 1}, round ${round}. Your angle: ${angles[i % angles.length]}. Search the web and read real sources. The system already has (do NOT propose): ${JSON.stringify(map.components.map(c => c.name))}. Already found this run (do NOT repeat): ${JSON.stringify(all.map(c => c.name))}. Return candidate features with function, rationale, source_quality (high=peer-reviewed/production-validated, medium=widely-used pattern, low=blog-grade), sources.`,
+        { label: `researcher-${i + 1}-r${round}`, phase: 'Pass 1 - Research', schema: S_CAND })))
+    const roundCands = found.filter(Boolean).flatMap(f => f.candidates)
+    const judged = await agent(`${PRE}
+You are the round judge (cheap dedup). Existing list: ${JSON.stringify(all)}. New this round: ${JSON.stringify(roundCands)}. Return new_candidates = only genuinely new, relevant-to-the-ask items (semantic dedup, drop off-topic), and dry = true iff new_candidates is empty.`,
+      { label: `dry-judge-r${round}`, phase: 'Pass 1 - Research', schema: S_DRY, model: 'haiku' })
+    if (!judged || judged.dry) { dry++; if (dry >= DIAL.dryStop) { log(`round ${round} dry - research complete`); break } }
+    else { dry = 0; all = all.concat(judged.new_candidates) }
+    if (!gate(1)) break
+  }
+  all = all.map((c, i) => ({ ...c, id: `c${i + 1}` }))
+  RUNSTATE.counts.candidates = all.length
+  await synth('Pass 1', 'pass-1-candidates.md', `Full unfiltered candidate list with function/rationale/source-quality/sources. JSON: ${JSON.stringify(all)}`, 'Pass 1 - Research')
+  return all
+}
+
+async function passFilter(map, candidates, priorOutcomes, userEdits) {
+  phase('Pass 2 - Filter')
+  const analysis = await agent(`${PRE}
+You are the filter analyst. For each candidate: (a) if you believe it already exists in the system, put it in drops with code "already-exists-verified" and name the map entry - it will be independently verified, so only claim it when the map really says so; (b) list failure modes + safeguards; (c) rank the rest on impact + feasibility (rank 1 = best). Never drop for weak/low-impact silently - use code "below-cut" with a one-line reason.
+${priorOutcomes ? `PRIOR RUN OUTCOMES on this repo (surface next to matching candidates as prior_outcome - NEVER auto-drop because of them, reasons go stale): ${priorOutcomes}` : ''}
+${userEdits ? `HUMAN CHECKPOINT EDITS (these OVERRIDE everything - apply them literally, log removed items with code "user-dropped"): ${userEdits}` : ''}
+SYSTEM MAP: ${JSON.stringify(map)}
+CANDIDATES: ${JSON.stringify(candidates)}`, { label: 'filter-analyst', phase: 'Pass 2 - Filter', schema: S_FILTER })
+  const claimed = analysis.drops.filter(d => d.code === 'already-exists-verified')
+  const verified = await parallel(claimed.map(d => () =>
+    agent(`${PRE}
+You are an independent redundancy verifier (you did NOT propose this drop). Claim: candidate "${d.name}" (${JSON.stringify(candidates.find(c => c.id === d.id) || d)}) already exists in this codebase. Locate and READ the actual source yourself - do not trust the map. Quote file + lines + snippet. Verdict: exists-fully (drop stands) / exists-partially (keep as "extend existing X") / stub (looks built, is not - keep) / not-found (keep).`,
+      { label: `redundancy:${d.name.slice(0, 30)}`, phase: 'Pass 2 - Filter', schema: S_RED }).then(v => ({ d, v }))))
+  const drops = analysis.drops.filter(x => x.code !== 'already-exists-verified')
+  let kept = analysis.kept
+  for (const { d, v } of verified.filter(Boolean)) {
+    if (v.verdict === 'exists-fully') drops.push({ ...d, evidence: v.evidence })
+    else kept.push({ id: d.id, name: v.verdict === 'exists-partially' ? `Extend existing: ${d.name} (${v.extend_note})` : d.name, rank: kept.length + 1, failure_modes: [], safeguards: [], prior_outcome: v.verdict === 'stub' ? 'stub found - map patched' : '' })
+  }
+  kept = kept.sort((x, y) => x.rank - y.rank)
+  const cut = kept.slice(DIAL.p3cap).map(k => ({ id: k.id, name: k.name, code: 'below-cut', reason: `ranked ${k.rank}, cap ${DIAL.p3cap}`, evidence: '' }))
+  kept = kept.slice(0, DIAL.p3cap)
+  await appendDrops(drops.concat(cut).map(d => ({ ...d, stage: 'pass-2' })), 'Pass 2 - Filter')
+  await synth('Pass 2', 'pass-2-filtered.md', `Kept candidates (ranked, with failure modes, safeguards, prior-outcome notes) and the redundancy-verifier evidence. kept=${JSON.stringify(kept)} verifier_evidence=${JSON.stringify(verified.filter(Boolean).map(x => ({ name: x.d.name, verdict: x.v.verdict, evidence: x.v.evidence })))}`, 'Pass 2 - Filter')
+  return { kept, drops }
+}
 // === Task 5: pass 3 ===
 // === Task 6: pass 4 + run dispatcher ===
 return { ok: true, partial: false, completed_passes: [], summary: 'skeleton', artifacts: [], counts: {}, decisions_needed: [], resume_command: '' }
