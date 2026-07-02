@@ -77,7 +77,45 @@ const S_JUDGE = { type: 'object', required: ['winner_stance', 'scores', 'grounde
   graft_list: { type: 'array', items: { type: 'object', required: ['from_stance', 'target_section', 'item'], properties: { from_stance: { type: 'string' }, target_section: { type: 'string', enum: ['Failure Handling', 'Feature Activation Plan', 'Verification Checklist', 'tests', 'risk-callouts'] }, item: { type: 'string' } } } },
   revision_order: { type: 'string', description: 'ONE bounded structural revision instruction, or empty' } } }
 const S_COHERE = { type: 'object', required: ['coherent', 'fixes_applied'], properties: { coherent: { type: 'boolean' }, fixes_applied: { type: 'array', items: { type: 'string' } } } }
-// === Task 3: plumbing helpers ===
+const PRE = `You are part of the "discover" feature-discovery pipeline, run ${A.name}, working on the project at ${A.project_root}.
+The feature ask: ${A.feature_ask}
+Run directory for artifacts: ${A.run_dir}
+EVIDENCE RULES (non-negotiable): Read actual source before claiming anything about the code - NEVER infer functionality from filenames (a stub file is a gap, not a feature). Free/public data only${A.free_data_only ? '' : ' EXCEPT the user has allowed paid sources'}; no fragile scraping or ToS violations. Cite what you inspected (file:line, command + output, URL). Your final structured output is consumed by a program - be precise, no padding.`
+
+const spent0 = budget.spent()
+const used = () => budget.spent() - spent0
+const BREAKER = A.budget_override || DIAL.breaker
+const gate = passNo => used() + DIAL.passEst[passNo] * 1.1 <= BREAKER
+
+const RUNSTATE = { artifacts: [], counts: { candidates: 0, drops: 0, kills: 0, survivors: 0 }, decisions: [] }
+
+async function synth(passTitle, fileName, bodySpec, phase) {
+  const r = await agent(`${PRE}
+You are the ${passTitle} synthesizer. Write the artifact file ${A.run_dir}/${fileName} (create/overwrite) with the content described below, formatted as clean human-readable markdown with plain-language section intros (the plugin author is not a coder). Then return {path, summary} where summary is 2-4 plain sentences.
+CONTENT SPEC:
+${bodySpec}`, { label: `synth:${fileName}`, phase, schema: S_ACK })
+  if (r && r.path) RUNSTATE.artifacts.push(r.path)
+  return r
+}
+
+async function appendDrops(drops, phase) {
+  if (!drops.length) return
+  RUNSTATE.counts.drops += drops.length
+  await agent(`${PRE}
+APPEND (never overwrite; create if missing) to ${A.run_dir}/drops-log.md one markdown bullet per item below, format: "- **<name>** [<stage> / <code>] <reason> - evidence: <evidence>". Items (JSON): ${JSON.stringify(drops)}
+Return {path, summary}.`, { label: 'synth:drops-log', phase, schema: S_ACK })
+}
+
+async function bootstrap() {
+  return await agent(`${PRE}
+You are the burst bootstrap reader. Read the run directory ${A.run_dir} (it may not exist yet - then found=false).
+Return the FULL TEXT of each of these files that exists, in artifacts keyed exactly: map=pass-0-system-map.md, candidates=pass-1-candidates.md, filtered=pass-2-filtered.md, kill_report=pass-3-kill-report.md, drops=drops-log.md. Also key outcomes_prior = concatenated content of outcome.json files from OTHER run dirs under ${A.project_root}/.claude/discover/*/outcome.json (empty string if none).
+user_edits = verbatim content of ${A.run_dir}/checkpoint-edits.md if it exists (the human's checkpoint decisions - these OVERRIDE artifact content), else "".`, { label: 'bootstrap', phase: 'Bootstrap', schema: S_BOOT })
+}
+
+function partialReturn(completed, why) {
+  return { ok: false, partial: true, completed_passes: completed, summary: why + ` Everything finished so far is saved in ${A.run_dir}. Resume with the command below - completed work will not be re-paid.`, artifacts: RUNSTATE.artifacts, counts: RUNSTATE.counts, decisions_needed: RUNSTATE.decisions, resume_command: `discover: ${A.name}` }
+}
 // === Task 4: passes 0-2 ===
 // === Task 5: pass 3 ===
 // === Task 6: pass 4 + run dispatcher ===
