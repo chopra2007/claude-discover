@@ -11,7 +11,7 @@ export const meta = {
   ],
 }
 
-const A = args
+const A = typeof args === 'string' ? JSON.parse(args) : args
 const DIALS = {
   light:    { mappers: 2, researchers: 2, roundCap: 2, dryStop: 1, p3cap: 3, skeptics: 2, rivals: 1, crossModel: false, breaker: 900_000,   passEst: { 0: 120_000, 1: 200_000, 2: 150_000, 3: 200_000, 4: 200_000 } },
   standard: { mappers: 3, researchers: 3, roundCap: 3, dryStop: 1, p3cap: 5, skeptics: 3, rivals: 2, crossModel: true,  breaker: 2_500_000, passEst: { 0: 300_000, 1: 500_000, 2: 400_000, 3: 600_000, 4: 600_000 } },
