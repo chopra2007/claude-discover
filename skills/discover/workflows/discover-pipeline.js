@@ -215,7 +215,7 @@ ADVOCATE REBUTTALS: ${JSON.stringify(defense ? defense.rulings : [])}`, { label:
     const unanimousKills = kept.filter(k => killedIds.has(k.id))
     const survivors = kept.filter(k => !killedIds.has(k.id))
     const batch = survivors.concat(unanimousKills).slice(0, 8)
-    const families = [['codex', 'timeout 240 codex exec'], ['gemini', 'GEMINI_CLI_TRUST_WORKSPACE=true timeout 240 gemini -p']].filter(([f]) => A.capabilities[f] === 'healthy')
+    const families = [['codex', 'timeout 240 codex exec'], ['gemini', 'GEMINI_CLI_TRUST_WORKSPACE=true timeout 240 gemini --skip-trust -y -m gemini-flash-latest -p']].filter(([f]) => A.capabilities[f] === 'healthy')
     xnotes = (await parallel(families.map(([fam, cli]) => () =>
       agent(`${PRE}
 You are the cross-model auditor for ${fam}. Compose ONE batched prompt covering all ideas below (include the panel's evidence per idea; for killed ideas attach the kill's failure scenario and ask "is this stated failure scenario factually correct for this system?"). Run it via bash: ${cli} "<your prompt>" . If the CLI errors or times out, return available=false. Parse the reply into per-candidate notes: endorse / dissent (for survivors) / dispute-kill (for killed ones). Advisory only - you are NOT a vote.
