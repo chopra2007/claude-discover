@@ -89,25 +89,51 @@ const gate = passNo => used() + DIAL.passEst[passNo] * 1.1 <= BREAKER
 
 const RUNSTATE = { artifacts: [], counts: { candidates: 0, drops: 0, kills: 0, survivors: 0 }, decisions: [] }
 
+// --- Dead-agent guard (systemic corruption fix) --------------------------------------------------
+// The engine returns null from agent() ONLY when a call dies on a terminal API error after retries;
+// a genuinely empty result is still a schema object. So null ALWAYS means "died", never "found nothing".
+// `failed` collects the labels of non-optional deaths; a boundary check after every pass halts the run
+// loud + resumable instead of silently continuing on missing data (or letting a downstream step
+// fabricate from nothing). This replaces the old per-step `if (!map)` band-aid with a systemic guard.
+const failed = []
+const deathMsg = () => `A required step died on a likely transient API error (${failed.join('; ')}). Halting so the run cannot continue on missing or fabricated data.`
+// Single-agent wrapper: record a non-optional death. Callers that safely handle null themselves
+// (a real degradation, not corruption) pass optional:true so they do not trip the guard.
+async function call(prompt, opts = {}) {
+  const r = await agent(prompt, opts)
+  if (r == null && !opts.optional) failed.push(opts.label || 'unlabeled')
+  return r
+}
+// Parallel-pool wrapper: drop dead members, log partial losses. A TOTAL wipeout of a `critical`
+// pool records a failure so the next boundary halts (a wiped pool must never fabricate from nothing);
+// an advisory pool (critical:false) just logs and continues with whatever survived.
+async function pool(thunks, name, { min = 1, critical = true } = {}) {
+  const res = (await parallel(thunks)).filter(Boolean)
+  if (res.length < min) { if (critical) failed.push(`${name} (0 of ${thunks.length} survived)`); else if (thunks.length) log(`${name}: all ${thunks.length} agents died (transient) - continuing`) }
+  else if (res.length < thunks.length) log(`${name}: ${thunks.length - res.length} of ${thunks.length} agents died (transient) - continuing with ${res.length}`)
+  return res
+}
+
 async function synth(passTitle, fileName, bodySpec, phase) {
-  const r = await agent(`${PRE}
+  const r = await call(`${PRE}
 You are the ${passTitle} synthesizer. Write the artifact file ${A.run_dir}/${fileName} (create/overwrite) with the content described below, formatted as clean human-readable markdown with plain-language section intros (the plugin author is not a coder). Then return {path, summary} where summary is 2-4 plain sentences.
 CONTENT SPEC:
-${bodySpec}`, { label: `synth:${fileName}`, phase, schema: S_ACK })
+${bodySpec}`, { label: `synth:${fileName}`, phase, schema: S_ACK, optional: true })
   if (r && r.path) RUNSTATE.artifacts.push(r.path)
+  else log(`synth:${fileName} did not return - the artifact file may be missing (pipeline data is unaffected; re-run this pass to regenerate it)`)
   return r
 }
 
 async function appendDrops(drops, phase) {
   if (!drops.length) return
   RUNSTATE.counts.drops += drops.length
-  await agent(`${PRE}
+  await call(`${PRE}
 APPEND (never overwrite; create if missing) to ${A.run_dir}/drops-log.md one markdown bullet per item below, format: "- **<name>** [<stage> / <code>] <reason> - evidence: <evidence>". Items (JSON): ${JSON.stringify(drops)}
-Return {path, summary}.`, { label: 'synth:drops-log', phase, schema: S_ACK })
+Return {path, summary}.`, { label: 'synth:drops-log', phase, schema: S_ACK, optional: true })
 }
 
 async function bootstrap() {
-  return await agent(`${PRE}
+  return await call(`${PRE}
 You are the burst bootstrap reader. Read the run directory ${A.run_dir} (it may not exist yet - then found=false).
 Return the FULL TEXT of each of these files that exists, in artifacts keyed exactly: map=pass-0-system-map.md, candidates=pass-1-candidates.md, filtered=pass-2-filtered.md, kill_report=pass-3-kill-report.md, drops=drops-log.md. Also key outcomes_prior = concatenated content of outcome.json files from OTHER run dirs under ${A.project_root}/.claude/discover/*/outcome.json (empty string if none).
 user_edits = verbatim content of ${A.run_dir}/checkpoint-edits.md if it exists (the human's checkpoint decisions - these OVERRIDE artifact content), else "".`, { label: 'bootstrap', phase: 'Bootstrap', schema: S_BOOT })
@@ -119,13 +145,13 @@ function partialReturn(completed, why) {
 async function passMap() {
   phase('Pass 0 - Map')
   if (A.greenfield) { log('greenfield project - Pass 0 skipped (nothing to map)'); return { components: [], data_sources: [], gaps: ['greenfield - no existing system'], unverified: [] } }
-  const views = await parallel(Array.from({ length: DIAL.mappers }, (_, i) => () =>
+  const views = await pool(Array.from({ length: DIAL.mappers }, (_, i) => () =>
     agent(`${PRE}
 You are codebase mapper ${i + 1} of ${DIAL.mappers}. Divide the repo mentally into ${DIAL.mappers} slices by top-level directory order and take slice ${i + 1}. READ the actual source files in your slice (entrypoints, core modules, config). Mark anything you did not actually read as unverified.`,
-      { label: `mapper-${i + 1}`, phase: 'Pass 0 - Map', schema: S_MAP })))
-  const merged = await agent(`${PRE}
+      { label: `mapper-${i + 1}`, phase: 'Pass 0 - Map', schema: S_MAP })), 'Pass 0 mappers', { min: 1, critical: true })
+  const merged = await call(`${PRE}
 You are the architect. Merge these mapper inventories into ONE faithful system map (dedupe, resolve conflicts by re-reading the disputed file yourself). Keep the unverified list honest.
-MAPPER OUTPUTS: ${JSON.stringify(views.filter(Boolean))}`, { label: 'architect-merge', phase: 'Pass 0 - Map', schema: S_MAP })
+MAPPER OUTPUTS: ${JSON.stringify(views)}`, { label: 'architect-merge', phase: 'Pass 0 - Map', schema: S_MAP })
   await synth('Pass 0', 'pass-0-system-map.md', `Component inventory, data sources, gaps (only truly absent things), and an "inferred but not verified" section. JSON to render: ${JSON.stringify(merged)}`, 'Pass 0 - Map')
   return merged
 }
@@ -136,14 +162,14 @@ async function passResearch(map) {
   let all = []
   let dry = 0
   for (let round = 1; round <= DIAL.roundCap; round++) {
-    const found = await parallel(Array.from({ length: DIAL.researchers }, (_, i) => () =>
+    const found = await pool(Array.from({ length: DIAL.researchers }, (_, i) => () =>
       agent(`${PRE}
 You are researcher ${i + 1}, round ${round}. Your angle: ${angles[i % angles.length]}. Search the web and read real sources. The system already has (do NOT propose): ${JSON.stringify(map.components.map(c => c.name))}. Already found this run (do NOT repeat): ${JSON.stringify(all.map(c => c.name))}. Return candidate features with function, rationale, source_quality (high=peer-reviewed/production-validated, medium=widely-used pattern, low=blog-grade), sources.`,
-        { label: `researcher-${i + 1}-r${round}`, phase: 'Pass 1 - Research', schema: S_CAND })))
-    const roundCands = found.filter(Boolean).flatMap(f => f.candidates)
-    const judged = await agent(`${PRE}
-You are the round judge (cheap dedup). Existing list: ${JSON.stringify(all)}. New this round: ${JSON.stringify(roundCands)}. Return new_candidates = only genuinely new, relevant-to-the-ask items (semantic dedup, drop off-topic), and dry = true iff new_candidates is empty.`,
-      { label: `dry-judge-r${round}`, phase: 'Pass 1 - Research', schema: S_DRY, model: 'haiku' })
+        { label: `researcher-${i + 1}-r${round}`, phase: 'Pass 1 - Research', schema: S_CAND })), `Pass 1 researchers round ${round}`, { min: 1, critical: false })
+    const roundCands = found.flatMap(f => f.candidates)
+    const judged = await call(`${PRE}
+You are the round judge (cheap dedup - NOT a generator). Existing list: ${JSON.stringify(all)}. New this round: ${JSON.stringify(roundCands)}. new_candidates MUST be a subset of items literally present in "New this round" above - NEVER invent, rename, or synthesize a candidate that is not already in that list, even if the list is empty and even if you can think of a good idea yourself. Return new_candidates = only the genuinely-new (vs Existing list) items from that subset (semantic dedup, drop off-topic), and dry = true iff new_candidates is empty. If "New this round" is empty, new_candidates MUST be [] and dry MUST be true - no exceptions.`,
+      { label: `dry-judge-r${round}`, phase: 'Pass 1 - Research', schema: S_DRY, model: 'haiku', optional: true })
     if (!judged || judged.dry) { dry++; if (dry >= DIAL.dryStop) { log(`round ${round} dry - research complete`); break } }
     else { dry = 0; all = all.concat(judged.new_candidates) }
     if (!gate(1)) break
@@ -156,39 +182,43 @@ You are the round judge (cheap dedup). Existing list: ${JSON.stringify(all)}. Ne
 
 async function passFilter(map, candidates, priorOutcomes, userEdits) {
   phase('Pass 2 - Filter')
-  const analysis = await agent(`${PRE}
+  const analysis = await call(`${PRE}
 You are the filter analyst. For each candidate: (a) if you believe it already exists in the system, put it in drops with code "already-exists-verified" and name the map entry - it will be independently verified, so only claim it when the map really says so; (b) list failure modes + safeguards; (c) rank the rest on impact + feasibility (rank 1 = best). Never drop for weak/low-impact silently - use code "below-cut" with a one-line reason.
 ${priorOutcomes ? `PRIOR RUN OUTCOMES on this repo (surface next to matching candidates as prior_outcome - NEVER auto-drop because of them, reasons go stale): ${priorOutcomes}` : ''}
 ${userEdits ? `HUMAN CHECKPOINT EDITS (these OVERRIDE everything - apply them literally, log removed items with code "user-dropped"): ${userEdits}` : ''}
 SYSTEM MAP: ${JSON.stringify(map)}
 CANDIDATES: ${JSON.stringify(candidates)}`, { label: 'filter-analyst', phase: 'Pass 2 - Filter', schema: S_FILTER })
+  if (!analysis) return { kept: [], drops: [] } // died -> failed[] recorded; the Pass 2 boundary halts loud
   const claimed = analysis.drops.filter(d => d.code === 'already-exists-verified')
-  const verified = await parallel(claimed.map(d => () =>
+  const verified = await pool(claimed.map(d => () =>
     agent(`${PRE}
 You are an independent redundancy verifier (you did NOT propose this drop). Claim: candidate "${d.name}" (${JSON.stringify(candidates.find(c => c.id === d.id) || d)}) already exists in this codebase. Locate and READ the actual source yourself - do not trust the map. Quote file + lines + snippet. Verdict: exists-fully (drop stands) / exists-partially (keep as "extend existing X") / stub (looks built, is not - keep) / not-found (keep).`,
-      { label: `redundancy:${d.name.slice(0, 30)}`, phase: 'Pass 2 - Filter', schema: S_RED }).then(v => ({ d, v }))))
+      { label: `redundancy:${d.name.slice(0, 30)}`, phase: 'Pass 2 - Filter', schema: S_RED }).then(v => v && { d, v })), 'Pass 2 redundancy verifiers', { min: 0, critical: false })
   const drops = analysis.drops.filter(x => x.code !== 'already-exists-verified')
   let kept = analysis.kept
-  for (const { d, v } of verified.filter(Boolean)) {
+  const verifiedIds = new Set(verified.map(x => x.d.id))
+  for (const { d, v } of verified) {
     if (v.verdict === 'exists-fully') drops.push({ ...d, evidence: v.evidence })
     else kept.push({ id: d.id, name: v.verdict === 'exists-partially' ? `Extend existing: ${d.name} (${v.extend_note})` : d.name, rank: kept.length + 1, failure_modes: [], safeguards: [], prior_outcome: v.verdict === 'stub' ? 'stub found - map patched' : '' })
   }
+  const unverified = claimed.filter(d => !verifiedIds.has(d.id)) // verifier died -> KEEP (never drop an unverified claim)
+  if (unverified.length) { log(`Pass 2: ${unverified.length} redundancy check(s) did not return - keeping those candidates to be safe (never drop unverified)`); unverified.forEach(d => kept.push({ id: d.id, name: d.name, rank: kept.length + 1, failure_modes: [], safeguards: [], prior_outcome: 'redundancy check unavailable - kept to be safe' })) }
   kept = kept.sort((x, y) => x.rank - y.rank)
   const cut = kept.slice(DIAL.p3cap).map(k => ({ id: k.id, name: k.name, code: 'below-cut', reason: `ranked ${k.rank}, cap ${DIAL.p3cap}`, evidence: '' }))
   kept = kept.slice(0, DIAL.p3cap)
   await appendDrops(drops.concat(cut).map(d => ({ ...d, stage: 'pass-2' })), 'Pass 2 - Filter')
-  await synth('Pass 2', 'pass-2-filtered.md', `Kept candidates (ranked, with failure modes, safeguards, prior-outcome notes) and the redundancy-verifier evidence. kept=${JSON.stringify(kept)} verifier_evidence=${JSON.stringify(verified.filter(Boolean).map(x => ({ name: x.d.name, verdict: x.v.verdict, evidence: x.v.evidence })))}`, 'Pass 2 - Filter')
+  await synth('Pass 2', 'pass-2-filtered.md', `Kept candidates (ranked, with failure modes, safeguards, prior-outcome notes) and the redundancy-verifier evidence. kept=${JSON.stringify(kept)} verifier_evidence=${JSON.stringify(verified.map(x => ({ name: x.d.name, verdict: x.v.verdict, evidence: x.v.evidence })))}`, 'Pass 2 - Filter')
   return { kept, drops }
 }
 async function passKill(map, kept) {
   phase('Pass 3 - Kill-test')
   const lenses = LENSES.slice(0, DIAL.skeptics)
-  const panel = (await parallel(lenses.map(l => () =>
+  const panel = await pool(lenses.map(l => () =>
     agent(`${PRE}
 You are the ${l.key} skeptic. Try to disprove EACH candidate below through your lens ONLY. Your evidence anchor - you MUST actually do this before objecting: ${l.anchor}
 An objection is kill-eligible ONLY if all three hold: CONCRETE (trigger + mechanism + impact), GROUNDED (evidence field cites an artifact you inspected THIS run), FATAL-CLASS (exactly one of ${FATAL_CLASSES.join(' / ')}). Otherwise mark kind=concern, fatal_class=none. Do not manufacture objections - explicit endorsement is a valid result.
 SYSTEM MAP: ${JSON.stringify(map)}
-CANDIDATES: ${JSON.stringify(kept)}`, { label: `skeptic:${l.key}`, phase: 'Pass 3 - Kill-test', schema: S_SKEPTIC })))).filter(Boolean)
+CANDIDATES: ${JSON.stringify(kept)}`, { label: `skeptic:${l.key}`, phase: 'Pass 3 - Kill-test', schema: S_SKEPTIC })), 'Pass 3 skeptics', { min: 1, critical: true })
   let objections = panel.flatMap(p => p.objections)
     .map((o, i) => ({ ...o, ref: `o${i + 1}`, kind: (o.kind === 'kill-eligible' && o.evidence && o.evidence.length > 20 && FATAL_CLASSES.includes(o.fatal_class)) ? 'kill-eligible' : 'concern' }))
   const killable = objections.filter(o => o.kind === 'kill-eligible')
@@ -196,16 +226,19 @@ CANDIDATES: ${JSON.stringify(kept)}`, { label: `skeptic:${l.key}`, phase: 'Pass 
   if (killable.length) {
     if (!gate(3)) { objections = objections.map(o => ({ ...o, kind: 'concern', budget_flagged: true })); log('budget guard: defense cannot run - kill-eligible objections downgraded to flagged concerns (never kill without a defense)') }
     else {
-      const defense = await agent(`${PRE}
+      const defense = await call(`${PRE}
 You are the advocate. For each kill-eligible objection below, draft the strongest honest rebuttal (tool access allowed - read the code, probe the source).
 OBJECTIONS: ${JSON.stringify(killable)}
 CANDIDATES: ${JSON.stringify(kept)}
-Return your rebuttals inside rulings with ruling=REJECTED and reason=your rebuttal (the judge will overwrite ruling).`, { label: 'advocate', phase: 'Pass 3 - Kill-test', schema: S_DEFENSE })
-      const judged = await agent(`${PRE}
+Return your rebuttals inside rulings with ruling=REJECTED and reason=your rebuttal (the judge will overwrite ruling).`, { label: 'advocate', phase: 'Pass 3 - Kill-test', schema: S_DEFENSE, optional: true })
+      if (!defense) { objections = objections.map(o => o.kind === 'kill-eligible' ? { ...o, kind: 'concern', defense_unavailable: true } : o); log('advocate step unavailable - no kills this run (never kill without a defense); kill-eligible objections downgraded to flagged concerns') }
+      else {
+        const judged = await call(`${PRE}
 You are the judge. For each objection: FIRST re-open its cited evidence yourself (re-read the file / re-run the command / re-fetch the URL) and record what you saw in evidence_recheck. Then, weighing the advocate's rebuttal, rule UPHELD (candidate dies) / CONVERTED (becomes safeguard + demerit) / REJECTED. An objection whose evidence does not check out is REJECTED. One UPHELD objection kills - there is no vote.
 OBJECTIONS: ${JSON.stringify(killable)}
-ADVOCATE REBUTTALS: ${JSON.stringify(defense ? defense.rulings : [])}`, { label: 'judge', phase: 'Pass 3 - Kill-test', schema: S_DEFENSE })
-      rulings = judged ? judged.rulings : []
+ADVOCATE REBUTTALS: ${JSON.stringify(defense.rulings)}`, { label: 'judge', phase: 'Pass 3 - Kill-test', schema: S_DEFENSE })
+        rulings = judged ? judged.rulings : []
+      }
     }
   }
   const killedIds = new Set(rulings.filter(r => r.ruling === 'UPHELD').map(r => r.candidate_id))
@@ -215,12 +248,12 @@ ADVOCATE REBUTTALS: ${JSON.stringify(defense ? defense.rulings : [])}`, { label:
     const unanimousKills = kept.filter(k => killedIds.has(k.id))
     const survivors = kept.filter(k => !killedIds.has(k.id))
     const batch = survivors.concat(unanimousKills).slice(0, 8)
-    const families = [['codex', 'timeout 240 codex exec'], ['gemini', 'GEMINI_CLI_TRUST_WORKSPACE=true timeout 240 gemini -p']].filter(([f]) => A.capabilities[f] === 'healthy')
-    xnotes = (await parallel(families.map(([fam, cli]) => () =>
+    const families = [['codex', 'timeout 240 codex exec'], ['gemini', 'GEMINI_CLI_TRUST_WORKSPACE=true timeout 240 gemini --skip-trust -y -m gemini-flash-latest -p']].filter(([f]) => A.capabilities[f] === 'healthy')
+    xnotes = (await pool(families.map(([fam, cli]) => () =>
       agent(`${PRE}
 You are the cross-model auditor for ${fam}. Compose ONE batched prompt covering all ideas below (include the panel's evidence per idea; for killed ideas attach the kill's failure scenario and ask "is this stated failure scenario factually correct for this system?"). Run it via bash: ${cli} "<your prompt>" . If the CLI errors or times out, return available=false. Parse the reply into per-candidate notes: endorse / dissent (for survivors) / dispute-kill (for killed ones). Advisory only - you are NOT a vote.
 IDEAS: ${JSON.stringify(batch)}
-KILL RULINGS: ${JSON.stringify(rulings)}`, { label: `xmodel:${fam}`, phase: 'Pass 3 - Kill-test', schema: S_XMODEL })))).filter(Boolean).filter(x => x.available)
+KILL RULINGS: ${JSON.stringify(rulings)}`, { label: `xmodel:${fam}`, phase: 'Pass 3 - Kill-test', schema: S_XMODEL })), 'Pass 3 cross-model', { min: 0, critical: false })).filter(x => x.available)
   }
   const survivors = kept.filter(k => !killedIds.has(k.id)).map(k => {
     const mine = objections.filter(o => o.candidate_id === k.id)
@@ -252,28 +285,32 @@ async function passPlan(map, survivors) {
   const STANCES = ['minimal-diff', 'robustness-first', 'extensibility-first'].slice(0, DIAL.rivals)
   let rivals
   if (DIAL.rivals > 1) {
-    const enu = await agent(`${PRE}
-Quick check: for integrating ${JSON.stringify(chosen.map(c => c.name))} into this system (map: ${JSON.stringify(map.components)}), how many MATERIALLY DISTINCT architectures exist? Distinct = different integration points or data flow, not different polish.`, { label: 'approach-enum', phase: 'Pass 4 - Plan', schema: S_APPROACHES, model: 'haiku' })
+    const enu = await call(`${PRE}
+Quick check: for integrating ${JSON.stringify(chosen.map(c => c.name))} into this system (map: ${JSON.stringify(map.components)}), how many MATERIALLY DISTINCT architectures exist? Distinct = different integration points or data flow, not different polish.`, { label: 'approach-enum', phase: 'Pass 4 - Plan', schema: S_APPROACHES, model: 'haiku', optional: true })
     if (enu && enu.distinct_architectures < 2) { log('approach space is narrow - tournament skipped, single plan'); rivals = [STANCES[0]] } else rivals = STANCES
   } else rivals = [STANCES[0]]
   const planPrompt = stance => `${PRE}
 You are the ${stance} planner. Produce a build-ready plan integrating the features below into the existing system without duplicating anything. Your assigned stance - optimize for: ${stance === 'minimal-diff' ? 'the smallest correct change; touch the fewest files' : stance === 'robustness-first' ? 'failure handling, safeguards, and observability' : 'clean seams for future features'}. READ the actual integration-point code before naming file paths or signatures. Every plan section required. EVERY feature needs a probe: live_probe {instruction: exact command/action, expected_evidence: what output proves it works} or deferred_probe {reason from ${PROBE_REASONS.join('/')}, owed_check}. destructive_or_costly REQUIRES a dry-run analog in instruction.
 FEATURES (with safeguards to bake in): ${JSON.stringify(chosen)}
 SYSTEM MAP: ${JSON.stringify(map)}`
-  const plans = (await parallel(rivals.map(s => () => agent(planPrompt(s), { label: `plan:${s}`, phase: 'Pass 4 - Plan', schema: S_PLAN })))).filter(Boolean)
+  const plans = await pool(rivals.map(s => () => agent(planPrompt(s), { label: `plan:${s}`, phase: 'Pass 4 - Plan', schema: S_PLAN })), 'Pass 4 planners', { min: 1, critical: true })
+  if (!plans.length) { log('all planners died - no plan written this run'); return { plan_path: `${A.run_dir}/final-plan.md` } } // failed[] recorded; the final guard halts loud
   let final = plans[0], judge = null
   if (plans.length > 1) {
-    judge = await agent(`${PRE}
+    judge = await call(`${PRE}
 You are the single tournament judge. Rubric per plan, scored 1-10 each, in isolation first: buildability (are named files/functions real - GREP THE CODE for each plan's claimed integration points, record findings in grounded_findings), completeness (all sections + probes), risk handling, fit-to-stance. Then ONE comparative pass -> winner_stance. graft_list: ONLY additive items from losers (allowed target sections: Failure Handling / Feature Activation Plan / Verification Checklist / tests / risk-callouts). Structural superiority of a loser => either declare it winner or put ONE bounded instruction in revision_order - structural ideas are NEVER grafted.
 PLANS: ${JSON.stringify(plans)}`, { label: 'tournament-judge', phase: 'Pass 4 - Plan', schema: S_JUDGE })
-    const winner = plans.find(p => p.stance === judge.winner_stance) || plans[0]
-    final = await agent(`${PRE}
+    if (judge) {
+      const winner = plans.find(p => p.stance === judge.winner_stance) || plans[0]
+      const revised = await call(`${PRE}
 You are the plan reviser. Re-generate the winning plan as ONE coherent whole: apply the graft list (additive items only, into their target sections)${judge.revision_order ? ' and this single structural revision: ' + judge.revision_order : ''}. Do not import any other loser ideas.
 WINNER: ${JSON.stringify(winner)}
 GRAFTS: ${JSON.stringify(judge.graft_list)}`, { label: 'plan-reviser', phase: 'Pass 4 - Plan', schema: S_PLAN })
-    const co = await agent(`${PRE}
-Coherence check on the merged plan: contradictions between sections, grafted items that don't fit, features without probes. Fix what you find and report fixes_applied. PLAN: ${JSON.stringify(final)}`, { label: 'coherence-check', phase: 'Pass 4 - Plan', schema: S_COHERE })
-    if (co && co.fixes_applied.length) log(`coherence pass applied ${co.fixes_applied.length} fixes`)
+      final = revised || winner
+      const co = await call(`${PRE}
+Coherence check on the merged plan: contradictions between sections, grafted items that don't fit, features without probes. Fix what you find and report fixes_applied. PLAN: ${JSON.stringify(final)}`, { label: 'coherence-check', phase: 'Pass 4 - Plan', schema: S_COHERE, optional: true })
+      if (co && co.fixes_applied.length) log(`coherence pass applied ${co.fixes_applied.length} fixes`)
+    }
   }
   await synth('Pass 4', 'final-plan.md', `The build spec Pass 5 reads. Render all 8 sections in order, then a "Feature Probes" section listing every feature's probe verbatim, then (if a tournament ran) "Tournament notes": scores table, grounded_findings, graft decisions, losing-plan one-line summaries. plan=${JSON.stringify(final)} judge=${JSON.stringify(judge)}`, 'Pass 4 - Plan')
   if (A.run_style === 'planonly') await synth('Pass 4', 'EXECUTE.md', `Separate-session kickoff per references/kickoff-prompt.md template: run name ${A.name}, absolute plan path ${A.run_dir}/final-plan.md, activation summary from the plan's Feature Activation Plan section, and the one-line resume trigger "discover: build ${A.name}".`, 'Pass 4 - Plan')
@@ -281,6 +318,7 @@ Coherence check on the merged plan: contradictions between sections, grafted ite
 }
 phase('Bootstrap')
 const boot = await bootstrap()
+if (!boot) return partialReturn([], 'The disk-read (bootstrap) step did not return - likely a transient API error.')
 const priorMap = boot.found && boot.artifacts.map ? boot.artifacts.map : ''
 const completed = []
 let map = null, candidates = null, filtered = null
@@ -288,33 +326,46 @@ try {
   if (A.from_pass > 0 && !boot.found) return partialReturn([], `Cannot start at pass ${A.from_pass}: no saved artifacts found in ${A.run_dir}.`)
   if (A.from_pass === 0) {
     if (!gate(0)) return partialReturn(completed, 'Budget too low for Pass 0.')
-    map = await passMap(); completed.push(0)
+    map = await passMap()
+    if (failed.length) return partialReturn(completed, deathMsg())
+    completed.push(0)
     if (!gate(1)) return partialReturn(completed, 'Budget exhausted after Pass 0.')
-    candidates = await passResearch(map); completed.push(1)
+    candidates = await passResearch(map)
+    if (failed.length) return partialReturn(completed, deathMsg())
+    completed.push(1)
     if (!gate(2)) return partialReturn(completed, 'Budget exhausted after Pass 1.')
-    filtered = await passFilter(map, candidates, boot.artifacts.outcomes_prior, boot.user_edits); completed.push(2)
+    filtered = await passFilter(map, candidates, boot.artifacts.outcomes_prior, boot.user_edits)
+    if (failed.length) return partialReturn(completed, deathMsg())
+    completed.push(2)
   } else {
     map = { fromDisk: true, raw: priorMap, components: [], data_sources: [], gaps: [], unverified: [] }
-    const reparse = await agent(`${PRE}\nParse this saved system-map artifact back into structured form:\n${priorMap}`, { label: 'reparse-map', phase: 'Bootstrap', schema: S_MAP, model: 'haiku' })
+    const reparse = await call(`${PRE}\nParse this saved system-map artifact back into structured form:\n${priorMap}`, { label: 'reparse-map', phase: 'Bootstrap', schema: S_MAP, model: 'haiku' })
     if (reparse) map = reparse
-    const refilter = await agent(`${PRE}\nParse the saved pass-2 artifact back into {kept, drops} structured form. HUMAN CHECKPOINT EDITS OVERRIDE the artifact - apply them (drop = remove from kept; note rewordings): edits=${JSON.stringify(boot.user_edits)}\nARTIFACT:\n${boot.artifacts.filtered}`, { label: 'reparse-filtered', phase: 'Bootstrap', schema: S_FILTER, model: 'haiku' })
+    const refilter = await call(`${PRE}\nParse the saved pass-2 artifact back into {kept, drops} structured form. HUMAN CHECKPOINT EDITS OVERRIDE the artifact - apply them (drop = remove from kept; note rewordings): edits=${JSON.stringify(boot.user_edits)}\nARTIFACT:\n${boot.artifacts.filtered}`, { label: 'reparse-filtered', phase: 'Bootstrap', schema: S_FILTER, model: 'haiku' })
     filtered = refilter || { kept: [], drops: [] }
+    if (failed.length) return partialReturn(completed, deathMsg())
   }
   let survivors = null
   if (A.to_pass >= 3 && A.from_pass <= 3) {
     if (!gate(3)) return partialReturn(completed, 'Budget exhausted before Pass 3.')
-    const kill = await passKill(map, filtered.kept); completed.push(3)
+    const kill = await passKill(map, filtered.kept)
+    if (failed.length) return partialReturn(completed, deathMsg())
+    completed.push(3)
     survivors = kill.survivors
   } else if (A.from_pass === 4) {
-    const rekill = await agent(`${PRE}\nParse the saved kill report back into {survivors, kills} structured form. HUMAN CHECKPOINT EDITS OVERRIDE (an overridden kill re-enters survivors WITH its objection recorded as a safeguard): edits=${JSON.stringify(boot.user_edits)}\nARTIFACT:\n${boot.artifacts.kill_report}`, { label: 'reparse-kill', phase: 'Bootstrap', schema: S_KILL, model: 'haiku' })
+    const rekill = await call(`${PRE}\nParse the saved kill report back into {survivors, kills} structured form. HUMAN CHECKPOINT EDITS OVERRIDE (an overridden kill re-enters survivors WITH its objection recorded as a safeguard): edits=${JSON.stringify(boot.user_edits)}\nARTIFACT:\n${boot.artifacts.kill_report}`, { label: 'reparse-kill', phase: 'Bootstrap', schema: S_KILL, model: 'haiku' })
+    if (failed.length) return partialReturn(completed, deathMsg())
     survivors = rekill ? rekill.survivors : []
   }
   if (A.to_pass >= 4) {
     if (!gate(4)) return partialReturn(completed, 'Budget exhausted before Pass 4.')
-    await passPlan(map, survivors); completed.push(4)
+    await passPlan(map, survivors)
+    if (failed.length) return partialReturn(completed, deathMsg())
+    completed.push(4)
   }
 } catch (e) {
   return partialReturn(completed, `A stage failed hard (${String(e).slice(0, 200)}).`)
 }
-const summary = await agent(`${PRE}\nWrite a 3-6 sentence plain-language summary of this burst for a non-coder: passes completed ${JSON.stringify(completed)}, counts ${JSON.stringify(RUNSTATE.counts)}, decisions needed ${JSON.stringify(RUNSTATE.decisions)}. Name the artifact files to look at. No jargon.`, { label: 'burst-summary', phase: completed.includes(4) ? 'Pass 4 - Plan' : 'Pass 3 - Kill-test', schema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } }, model: 'haiku' })
+if (failed.length) return partialReturn(completed, deathMsg())
+const summary = await call(`${PRE}\nWrite a 3-6 sentence plain-language summary of this burst for a non-coder: passes completed ${JSON.stringify(completed)}, counts ${JSON.stringify(RUNSTATE.counts)}, decisions needed ${JSON.stringify(RUNSTATE.decisions)}. Name the artifact files to look at. No jargon.`, { label: 'burst-summary', phase: completed.includes(4) ? 'Pass 4 - Plan' : 'Pass 3 - Kill-test', schema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } }, model: 'haiku', optional: true })
 return { ok: true, partial: false, completed_passes: completed, summary: summary ? summary.text : 'burst complete', artifacts: RUNSTATE.artifacts, counts: RUNSTATE.counts, decisions_needed: RUNSTATE.decisions, resume_command: '' }

@@ -27,9 +27,9 @@ const canned = label =>
   label.startsWith('reparse-kill') ? { survivors: [{ id: 'c1', name: 'F1', demerits: 0, safeguards: [], near_miss: '', cross_family: '' }], kills: [] } :
   { }
 
-async function runCase(name, argsObj, assert) {
+async function runCase(name, argsObj, assert, cannedFn = canned) {
   const calls = []
-  const agent = async (prompt, opts = {}) => { calls.push(opts.label || 'unlabeled'); return canned(opts.label || '') }
+  const agent = async (prompt, opts = {}) => { calls.push(opts.label || 'unlabeled'); return cannedFn(opts.label || '') }
   const parallel = async thunks => Promise.all(thunks.map(t => t().catch(() => null)))
   const pipeline = async (items, ...stages) => Promise.all(items.map(async (it, i) => { let v = it; for (const s of stages) v = await s(v, it, i); return v }))
   const fn = new AsyncFn('args', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'budget', 'workflow', body)
@@ -55,3 +55,29 @@ await runCase('burst-C-4-4-resume', { ...base, from_pass: 4, to_pass: 4 },
   r => (!r.partial ? 'must be partial without saved artifacts (bootstrap stub returns found:false)' : ''))
 await runCase('greenfield-skips-map', { ...base, greenfield: true, from_pass: 0, to_pass: 2 },
   (r, calls) => calls.some(c => c.startsWith('mapper')) ? 'mappers ran on greenfield' : '')
+
+// --- systemic dead-agent guard (v1.2): a null agent() return means the agent DIED on an API error,
+// never "found nothing". A critical death must halt loud + resumable, never silently continue/fabricate.
+// The 4th arg overrides the canned responder so a chosen label returns null (simulates a dead agent).
+const hf = { ...base, run_style: 'handsoff', from_pass: 0, to_pass: 4 }
+await runCase('architect-death-halts', hf,
+  r => r.ok ? 'must NOT be ok when architect-merge died' : !r.partial ? 'must be partial' : r.completed_passes.includes(0) ? 'Pass 0 must not be marked complete when its merge died' : '',
+  l => l === 'architect-merge' ? null : canned(l))
+await runCase('mapper-wipeout-halts', hf,
+  r => r.ok ? 'must NOT be ok when all mappers died' : !r.partial ? 'must be partial' : '',
+  l => l.startsWith('mapper') ? null : canned(l))
+await runCase('partial-mapper-loss-continues', hf,
+  r => !r.ok ? 'a partial pool loss (1 of 2 mappers) should still complete: ' + r.summary : '',
+  l => l === 'mapper-1' ? null : canned(l))
+await runCase('filter-death-halts', hf,
+  r => r.ok ? 'must NOT be ok when filter-analyst died' : r.completed_passes.includes(2) ? 'Pass 2 must not be marked complete' : '',
+  l => l === 'filter-analyst' ? null : canned(l))
+await runCase('kill-judge-death-halts', hf,
+  r => r.ok ? 'must NOT be ok when the kill-test judge died' : r.completed_passes.includes(3) ? 'Pass 3 must not be marked complete' : '',
+  l => l === 'judge' ? null : canned(l))
+await runCase('redundancy-death-keeps-and-completes', hf,
+  r => !r.ok ? 'a dead redundancy verifier is non-critical (candidate kept to be safe) - run should still complete: ' + r.summary : '',
+  l => l.startsWith('redundancy') ? null : canned(l))
+await runCase('bootstrap-death-halts', hf,
+  r => r.ok ? 'must NOT be ok when bootstrap (disk read) died' : !r.partial ? 'must be partial' : '',
+  l => l === 'bootstrap' ? null : canned(l))
