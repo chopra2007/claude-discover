@@ -29,15 +29,17 @@ const canned = label =>
 
 async function runCase(name, argsObj, assert, cannedFn = canned) {
   const calls = []
-  const agent = async (prompt, opts = {}) => { calls.push(opts.label || 'unlabeled'); return cannedFn(opts.label || '') }
+  const seats = {} // label -> "model:effort" the resolver assigned (captured post-withModel)
+  const agent = async (prompt, opts = {}) => { const l = opts.label || 'unlabeled'; calls.push(l); if (opts.model) seats[l] = `${opts.model}:${opts.effort}`; return cannedFn(l) }
   const parallel = async thunks => Promise.all(thunks.map(t => t().catch(() => null)))
   const pipeline = async (items, ...stages) => Promise.all(items.map(async (it, i) => { let v = it; for (const s of stages) v = await s(v, it, i); return v }))
   const fn = new AsyncFn('args', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'budget', 'workflow', body)
   const result = await fn(argsObj, agent, parallel, pipeline, () => {}, () => {}, { total: null, spent: () => 0, remaining: () => Infinity }, async () => null)
-  const err = assert(result, calls)
+  const err = assert(result, calls, seats)
   console.log(err ? `FAIL ${name}: ${err}` : `PASS ${name}`)
   if (err) process.exitCode = 1
 }
+const expectSeats = (seats, want) => { for (const [l, v] of Object.entries(want)) if (seats[l] !== v) return `${l} = ${seats[l] || 'MISSING'}, want ${v}`; return '' }
 
 const base = { name: 'toy', run_dir: '/tmp/x', project_root: '/tmp/p', feature_ask: 'add F', dial: 'light', run_style: 'checkpoints', greenfield: false, capabilities: { omc: false, superpowers: false, codex: 'absent', gemini: 'absent' }, budget_override: null, free_data_only: true }
 
@@ -81,3 +83,27 @@ await runCase('redundancy-death-keeps-and-completes', hf,
 await runCase('bootstrap-death-halts', hf,
   r => r.ok ? 'must NOT be ok when bootstrap (disk read) died' : !r.partial ? 'must be partial' : '',
   l => l === 'bootstrap' ? null : canned(l))
+
+// --- v1.2 per-seat model + effort resolver (3-layer control) ---
+// standard dial so every seat runs (3 mappers/skeptics, tournament of 2 plans). Canned signals:
+// approach-enum distinct=2 -> tournament-judge complexity 'low'; 3 kill-eligible objections -> kill-judge 'high'.
+const std = { ...base, dial: 'standard', run_style: 'handsoff', from_pass: 0, to_pass: 4 }
+await runCase('models-balanced-default', std, (r, calls, seats) => expectSeats(seats, {
+  'bootstrap': 'haiku:low', 'mapper-1': 'sonnet:low', 'architect-merge': 'opus:medium',
+  'researcher-1-r1': 'sonnet:low', 'dry-judge-r1': 'haiku:low', 'filter-analyst': 'opus:medium',
+  'skeptic:code-reality': 'opus:medium', 'advocate': 'opus:medium', 'judge': 'fable:high', // kill-judge: balanced + complex -> fable.high
+  'approach-enum': 'opus:low', 'plan:minimal-diff': 'opus:medium', 'tournament-judge': 'opus:medium', // balanced + narrow -> opus
+  'plan-reviser': 'opus:medium', 'coherence-check': 'opus:low', 'synth:pass-0-system-map.md': 'haiku:low',
+}))
+await runCase('models-quick-caps-opus', { ...std, model_tier: 'quick' }, (r, calls, seats) => expectSeats(seats, {
+  'judge': 'opus:high', 'tournament-judge': 'opus:medium', // Quick never reaches Fable
+  'filter-analyst': 'opus:medium', 'skeptic:code-reality': 'opus:medium', 'mapper-1': 'sonnet:low',
+}))
+await runCase('models-max-reaches-fable', { ...std, model_tier: 'max' }, (r, calls, seats) => expectSeats(seats, {
+  'judge': 'fable:high', 'tournament-judge': 'fable:medium', // Max: both judges Fable
+  'filter-analyst': 'opus:high', 'skeptic:code-reality': 'opus:high', 'plan:minimal-diff': 'opus:high',
+  'plan-reviser': 'opus:high', 'mapper-1': 'sonnet:low', 'synth:pass-0-system-map.md': 'haiku:low', // mechanical stays cheap at every tier
+}))
+await runCase('models-pins-override-both-judges', { ...std, pins: { judge: 'fable:max', 'plan-judge': 'opus:high' } }, (r, calls, seats) => expectSeats(seats, {
+  'judge': 'fable:max', 'tournament-judge': 'opus:high', // L3 pin (plan-judge alias) beats the preset/auto
+}))
