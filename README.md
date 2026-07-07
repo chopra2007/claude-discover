@@ -44,6 +44,12 @@ inspected this run (a file and line, a command's output, a fetched page), and an
 defend before a judge re-checks that evidence and rules. One proven fatal objection kills — there
 is no majority vote.
 
+discover also picks the right AI model and thinking-depth for each step on its own: a fast cheap
+model for the busywork (reading files, formatting), the strongest model only for the two
+make-or-break judge calls (which idea to kill, which plan wins), auto-tuned to how hard the run is.
+And if any helper ever dies on a server error mid-run, the run stops loudly and resumes cleanly
+rather than quietly carrying on with missing data.
+
 ---
 
 ## Install
@@ -68,30 +74,47 @@ discover is heavyweight, so it only activates on an explicit trigger:
 Extra sub-commands:
 
 - `discover: <name>` — resume a run where it left off.
-- `discover: build <name>` — build a plan you saved earlier (Plan-only style).
+- `discover: build <name>` — build a plan you saved earlier (build-later style).
 - `discover: recheck` — re-scan for optional boosters.
 - `discover: <name> budget=N` — power-user cap on how many Claude tokens the run may spend.
+- `discover: <name> tier=quick|balanced|max` — set the model-strength ceiling inline.
+- `discover: <name> judge=fable:max` (or `plan-judge=opus:high`) — power-user pin on a judge step.
 
 It will NOT activate on plain "add a feature", "build me X", or "improve my system" — the trigger
 is intentionally narrow.
 
 ---
 
-## The three setup questions
+## Setup questions
 
-discover asks these once, at the start, and never guesses them for you:
+discover asks these once, at the start, and never guesses them for you. The fixed choices come as a
+single click-to-choose prompt.
 
 - **Run name** — a short kebab-case slug (e.g. `reddit-sentiment`). It becomes the folder at
   `.claude/discover/<run-name>/` where every artifact lives, and it's the key you re-use to
   resume if the session dies.
-- **Thoroughness** — how hard it digs, and roughly what it costs:
+- **Thoroughness — how WIDE (how many agents):**
   - **Light** — a quick sweep (2 mappers, 2 research rounds, 2 skeptics, 1 plan); small token spend.
   - **Standard** (default) — the balanced middle (3 mappers, 3 rounds, 3 skeptics, 2 rival plans).
   - **Deep** — exhaustive (5 mappers, up to 5 rounds, 5 skeptics, 3 rival plans); can eat a large
     chunk of a 5-hour usage window.
-- **Run style** — **Hands-off** (passes 0–4 straight through, then build after one OK on the plan),
-  **Checkpoints** (review the shortlist, any kills, and the plan before the build), or **Plan-only**
-  (stop at the plan; build it later with `discover: build <name>`).
+- **Model tier — how STRONG (which AI models):** a ceiling on the two make-or-break judge steps.
+  - **Quick** — cheaper models; the judges cap at Opus and never reach the top model.
+  - **Balanced** (default) — Opus normally, stepping up to the strongest model only when a decision
+    is genuinely hard.
+  - **Max** — the strongest model, at full thinking-depth, on both judges.
+
+  Thoroughness and Model tier are *different* dials: Thoroughness is how *many* agents, Model tier is
+  how *strong* they are. The cheap mechanical steps (reading files, formatting) stay on a fast cheap
+  model at every tier — only the handful of judgment calls get the expensive models, and the run
+  auto-tunes their effort to how hard it turns out to be.
+- **Reviews & build** — tick where you want to pause (after the shortlist is pre-checked; after the
+  kill-test; rarely, after the map or research), or tick nothing for a fully hands-off run — then
+  choose **Build it now** or **Stop at the plan** (build later with `discover: build <name>`). The
+  finished plan is always shown to you for one OK before any code is written.
+
+Power users can hand-pin a judge (`judge=fable:max`) or set the tier inline (`discover: <name>
+tier=max`) — see Usage.
 
 ---
 
@@ -140,6 +163,11 @@ Linux and macOS. Windows is untested.
 
 ## Changelog
 
+- **1.2.0** — Per-step model + thinking-depth: each helper now runs on a model matched to its job
+  (cheap for the busywork, the strongest only for the two make-or-break judges), with a
+  Quick/Balanced/Max tier dial and optional per-judge pins. Setup is now one click-to-choose prompt
+  with plain-English review points. Plus a systemic safety guard: if any helper dies on a server
+  error the run stops loudly and resumes cleanly instead of silently continuing on missing data.
 - **1.1.0** — Rebuilt on Claude Code's built-in Workflow engine. tmux removed; boosters are now
   fully optional. New evidence-rule kill-test, plan tournament, and cross-run outcome memory.
 
