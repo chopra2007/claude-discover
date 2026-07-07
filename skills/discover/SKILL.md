@@ -24,7 +24,9 @@ Only on one of four explicit triggers:
 If none of those four triggers is in the message, this skill does NOT activate — even if the request looks like a perfect fit. Phrases like "add a feature", "extend my system", "build me X", or "improve the bot" alone are never enough. The user has chosen explicit-invocation-only on purpose to avoid heavyweight workflows for simple changes.
 
 Additional sub-triggers: `discover: recheck` (force capability rescan) · `discover: build <name>`
-(build a saved plan) · `discover: <name> budget=N` (power-user token cap override).
+(build a saved plan) · `discover: <name> budget=N` (power-user token cap override) ·
+`discover: <name> tier=quick|balanced|max` (model-strength ceiling) · `discover: <name> judge=fable:max`
+or `plan-judge=opus:high` (power-user per-seat pin on a judge → `pins`).
 
 ## Startup sequence — in order, before ANY work
 
@@ -40,23 +42,58 @@ Additional sub-triggers: `discover: recheck` (force capability rescan) · `disco
    Write the file: `{claude_code_version, omc, superpowers, codex_installed, gemini_installed,
    scanned_at}`.
 3. **Booster health (per run, parallel, ~10s timeout each).** Only for installed CLIs:
-   `timeout 10 codex exec "say ok"` and `GEMINI_CLI_TRUST_WORKSPACE=true timeout 10 gemini -p "say ok"`.
+   `timeout 10 codex exec "say ok"` and
+   `GEMINI_CLI_TRUST_WORKSPACE=true timeout 10 gemini --skip-trust -y -m gemini-flash-latest -p "say ok"`
+   (the `--skip-trust -y` flags are required — without them the CLI hangs waiting for a trust prompt
+   and the probe times out into a false "broken"; this matches the cross-model call the engine runs).
    healthy = replies; broken = installed but errors (usually logged out). Show ONE status line, e.g.:
    `✅ OMC · ✅ superpowers · ⚠️ Codex (logged out) · ✅ Gemini — cross-model will use Gemini only.`
-   If anything is ⚠️: say the exact fix (`codex login` / `gemini` re-auth) and ask: pause & fix, or
-   proceed without it? EXCEPTION — Hands-off run style: never block; proceed-without and put the
-   ⚠️ prominently in the final report.
-4. **The three setup questions** (ask all in ONE message; parameter inputs, exempt from
-   no-confirmation rules; never silently defaulted):
-   - **Name** — confirm or correct the auto-generated kebab-case slug. When you ask the user, phrase it so they understand *why* it matters — not just "what should we call this run?". Tell them: this slug becomes the directory at `.claude/discover/<run-name>/` where every artifact for this run lives (state.json + per-pass markdown + EXECUTE.md), it's the **resume key** if context compacts or the terminal dies (re-invoking `discover:` with the same name picks up from the last completed pass), and `EXECUTE.md` (the Pass 5 kickoff prompt) embeds the absolute path containing this slug — so renaming mid-run is awkward. Show them the auto-suggested slug and ask them to confirm or replace it. Example phrasing: *"**Run name** — I'll use `reddit-sentiment` as the slug for this run. All artifacts (state.json, pass-*.md, EXECUTE.md) will live at `.claude/discover/reddit-sentiment/`, and that name is the key you'd re-use to resume if context compacts or you reopen the session later. Confirm, or give me a different short kebab-case name."*
-   - **Thoroughness** — Light / Standard (default) / Deep. Explain in plain words with the cost
-     line: Light ≈ a quick sweep (2 mappers, 2 research rounds, 2 skeptics, 1 plan; small token
-     spend); Standard ≈ the default balance (3/3/3/2 rivals); Deep ≈ exhaustive (5 mappers,
-     up to 5 rounds, 5 skeptics, 3 rival plans; can be a large chunk of a 5-hour usage window).
-   - **Run style** — Hands-off (passes 0–4 straight; build after one OK on the plan) /
-     Checkpoints (recommended: review the shortlist after pass 2; if the kill-test kills
-     something, review that too; review the plan before build) / Plan-only (stop at the plan;
-     `discover: build <name>` later).
+   If anything is ⚠️: say the exact fix (`codex login` / `gemini` re-auth) and ask via AskUserQuestion
+   (Pause & fix / Proceed without it). EXCEPTION — Hands-off run style: never block; proceed-without
+   and put the ⚠️ prominently in the final report.
+4. **Setup — the run Name (in prose) + ONE batched AskUserQuestion for the four fixed choices.**
+   These are parameter inputs, exempt from no-confirmation rules; never silently defaulted. Every
+   fixed 2–4-option decision goes through AskUserQuestion; only genuinely free-text values stay prose.
+   - **Name (free text — ask in prose; AskUserQuestion needs ≥2 real options and a name has one.)**
+     Show the auto-generated kebab-case slug and say *why* it matters: it becomes the directory
+     `.claude/discover/<run-name>/` where every artifact lives (state.json + per-pass markdown +
+     EXECUTE.md), it is the **resume key** if context compacts or the terminal dies (re-invoking
+     `discover:` with the same name resumes from the last completed pass), and EXECUTE.md embeds the
+     absolute path containing the slug — so renaming mid-run is awkward. Example: *"I'll call this run
+     `reddit-sentiment` — artifacts live at `.claude/discover/reddit-sentiment/`, and that name is how
+     you'd resume later. Confirm, or give me a different short kebab-case name."*
+   - **Then ONE AskUserQuestion call with these four questions** (label everything in plain English —
+     never "pass N"):
+     1. **Thoroughness** (single) — how WIDE, i.e. how many agents. Light = quick sweep (2 mappers,
+        2 research rounds, 2 skeptics, 1 plan; small spend) · **Standard (default)** = 3/3/3/2 rivals ·
+        Deep = exhaustive (5 mappers, up to 5 rounds, 5 skeptics, 3 rival plans; a large chunk of a
+        5-hour window). → `dial`.
+     2. **Model tier** (single) — how STRONG, a ceiling on the two make-or-break judge steps.
+        Quick = cheaper models, judges cap at Opus (never the top Fable model) · **Balanced (default)**
+        = Opus normally, reaches Fable only when the decision is genuinely hard · Max = Fable at full
+        thinking-depth on both judges. (Quick = cheaper *models*; that is different from Light = fewer
+        *agents*.) The cheap mechanical steps stay cheap at every tier; the run auto-tunes the judges'
+        effort underneath the ceiling from how hard the run turns out to be. → `model_tier`.
+     3. **Reviews** (MULTI-select — tick where to pause; **tick none = fully hands-off**):
+        ☑ After the shortlist (pre-checked, recommended) · ☐ After the kill-test (auto-pauses anyway
+        if something is killed or contested) · ☐ After the map (rarely useful) · ☐ After research
+        (rarely useful). The map/research pauses each split the bundled 0→2 burst into extra
+        round-trips, so leave them off unless you have a reason.
+     4. **After the plan** (single) — **Build it now (default)** = go straight into Pass 5 (still shows
+        you the plan for one OK first) · Stop at the plan = write the plan + EXECUTE.md and stop; build
+        later with `discover: build <name>`.
+   - **Plan review is always-on** — even fully hands-off, the plan is shown for one OK before any code
+     is written. It is NOT one of the checkboxes.
+   - **Map the answers back to the internal `run_style`** the burst plan below uses:
+     • "Stop at the plan" → `run_style: planonly`.
+     • else any Reviews ticked → `run_style: checkpoints` (fire exactly the ticked pauses; the
+       kill-test pause also auto-fires when `counts.kills > 0` or `decisions_needed` is non-empty).
+     • else (nothing ticked + build now) → `run_style: handsoff`.
+   - **Optional fine-override** (only if the user asks to hand-tune the judges): a SECOND
+     AskUserQuestion, one question per judge — **Kill judge** and **Plan judge**, each ●Auto (default)
+     / Opus·high / Fable·high / Fable·max. A non-Auto pick becomes a per-seat pin
+     (`pins: { judge: "fable:max" }` for the kill judge, `{ "plan-judge": "opus:high" }` for the plan
+     judge). Do NOT expose the other seats — stop at the two judges.
 5. **Greenfield detection.** Run `git ls-files | head -50` and `find . -maxdepth 2 -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.rs" \) | head -20` (adjust extensions to context). If the project has fewer than ~10 source files or no recognizable structure, it's greenfield. Sets
    `greenfield: true` in args; Pass 0 is skipped by the script with a note.
 6. **Run dir init.** Create `.claude/discover/<name>/`; write `state.json`:
@@ -71,12 +108,16 @@ Launch the engine via the Workflow tool: `{scriptPath: "<skill-base>/workflows/d
 args: {...}}` with the args contract: name, run_dir (absolute), project_root (absolute),
 feature_ask (user's words), dial, run_style, from_pass, to_pass, greenfield, capabilities
 (from steps 2–3: {omc, superpowers, codex: healthy|broken|absent, gemini: ...}),
-budget_override (from `budget=N` or null), free_data_only (true unless the user allowed paid).
+budget_override (from `budget=N` or null), free_data_only (true unless the user allowed paid),
+model_tier (`quick|balanced|max` from the Model-tier answer, default `balanced`), pins (object of
+per-seat judge pins from the fine-override or a typed `judge=…`/`plan-judge=…`, else `{}`).
 
 - Hands-off / Plan-only: ONE burst `from_pass: 0, to_pass: 4`.
-- Checkpoints: burst `0→2`; **shortlist review**; burst `3→3`; **kill review ONLY if
-  counts.kills > 0 or decisions_needed is non-empty** (no kills → launch burst `4→4`
-  immediately); **plan review**; then Pass 5.
+- Checkpoints: burst `0→2`; **shortlist review** (present the kept list; offer which to drop as a
+  multi-select AskUserQuestion over the live shortlist, plus free-text for rewordings); burst `3→3`;
+  **kill review ONLY if counts.kills > 0 or decisions_needed is non-empty** (no kills → launch burst
+  `4→4` immediately); **plan review**; then Pass 5. Fire a ticked pause only if the user checked it
+  in the Reviews question (the kill review also auto-fires on kills/disputes regardless).
 - After EVERY burst: update `state.json` (current_pass, bursts += {from,to,ok,partial}); relay
   the returned summary + artifact paths to the user in plain language. NEVER paste artifact
   contents into chat unless the user asks; name the files instead.
@@ -130,7 +171,7 @@ budget_override (from `budget=N` or null), free_data_only (true unless the user 
 
 ## Anti-patterns
 
-- **Skipping the setup questions because the user has a "no confirmation" rule in CLAUDE.md.** Those questions are parameter inputs, not yes/no gates. Auto-defaulting them — especially thoroughness and run style — silently strips the user's ability to control token budget, review checkpoints, and whether the build runs in this session or a fresh one. Always ask.
+- **Skipping the setup questions because the user has a "no confirmation" rule in CLAUDE.md.** Those questions are parameter inputs, not yes/no gates. Auto-defaulting them — especially thoroughness, model tier, and the review points — silently strips the user's ability to control token budget, model strength, review checkpoints, and whether the build runs in this session or a fresh one. Always ask (one batched AskUserQuestion).
 - **Skipping Pass 0 to "save time."** It's the redundancy guard. Without it, Pass 1 will propose features that already exist.
 - **Letting researchers infer functionality from filenames.** Source must be read.
 - **Treating cross-model output as gospel.** It's a second opinion, not an oracle — advisory only, never a vote. The user makes the call on disagreements.
