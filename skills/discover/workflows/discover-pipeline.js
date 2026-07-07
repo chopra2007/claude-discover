@@ -142,7 +142,7 @@ You are researcher ${i + 1}, round ${round}. Your angle: ${angles[i % angles.len
         { label: `researcher-${i + 1}-r${round}`, phase: 'Pass 1 - Research', schema: S_CAND })))
     const roundCands = found.filter(Boolean).flatMap(f => f.candidates)
     const judged = await agent(`${PRE}
-You are the round judge (cheap dedup). Existing list: ${JSON.stringify(all)}. New this round: ${JSON.stringify(roundCands)}. Return new_candidates = only genuinely new, relevant-to-the-ask items (semantic dedup, drop off-topic), and dry = true iff new_candidates is empty.`,
+You are the round judge (cheap dedup - NOT a generator). Existing list: ${JSON.stringify(all)}. New this round: ${JSON.stringify(roundCands)}. new_candidates MUST be a subset of items literally present in "New this round" above - NEVER invent, rename, or synthesize a candidate that is not already in that list, even if the list is empty and even if you can think of a good idea yourself. Return new_candidates = only the genuinely-new (vs Existing list) items from that subset (semantic dedup, drop off-topic), and dry = true iff new_candidates is empty. If "New this round" is empty, new_candidates MUST be [] and dry MUST be true - no exceptions.`,
       { label: `dry-judge-r${round}`, phase: 'Pass 1 - Research', schema: S_DRY, model: 'haiku' })
     if (!judged || judged.dry) { dry++; if (dry >= DIAL.dryStop) { log(`round ${round} dry - research complete`); break } }
     else { dry = 0; all = all.concat(judged.new_candidates) }
@@ -289,6 +289,7 @@ try {
   if (A.from_pass === 0) {
     if (!gate(0)) return partialReturn(completed, 'Budget too low for Pass 0.')
     map = await passMap(); completed.push(0)
+    if (!map) return partialReturn(completed, 'Pass 0 did not return a usable system map (the merge step failed - likely a transient API error) - cannot safely continue into Pass 1 with no map, since every researcher call needs it. A saved pass-0-system-map.md may still exist from an agent recovery attempt, but the pipeline requires the structured map, not just the file. Resume to retry Pass 0 cleanly.')
     if (!gate(1)) return partialReturn(completed, 'Budget exhausted after Pass 0.')
     candidates = await passResearch(map); completed.push(1)
     if (!gate(2)) return partialReturn(completed, 'Budget exhausted after Pass 1.')
