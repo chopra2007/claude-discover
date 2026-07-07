@@ -161,13 +161,16 @@ async function pool(thunks, name, { min = 1, critical = true } = {}) {
   return res
 }
 
-async function synth(passTitle, fileName, bodySpec, phase) {
+async function synth(passTitle, fileName, bodySpec, phase, opt = false) {
+  // A pass's PRIMARY artifact is the on-disk hand-off between separate bursts (checkpoints/planonly),
+  // so a primary synth death is non-optional: it must halt, not silently mark the pass complete with
+  // no file for the next burst's reparse to read. Auxiliary artifacts (backlog, EXECUTE.md) pass opt:true.
   const r = await call(`${PRE}
 You are the ${passTitle} synthesizer. Write the artifact file ${A.run_dir}/${fileName} (create/overwrite) with the content described below, formatted as clean human-readable markdown with plain-language section intros (the plugin author is not a coder). Then return {path, summary} where summary is 2-4 plain sentences.
 CONTENT SPEC:
-${bodySpec}`, { label: `synth:${fileName}`, phase, schema: S_ACK, optional: true })
+${bodySpec}`, { label: `synth:${fileName}`, phase, schema: S_ACK, optional: opt })
   if (r && r.path) RUNSTATE.artifacts.push(r.path)
-  else log(`synth:${fileName} did not return - the artifact file may be missing (pipeline data is unaffected; re-run this pass to regenerate it)`)
+  else log(`synth:${fileName} did not return - artifact not written${opt ? '' : ' (halting: later bursts read this file from disk)'}`)
   return r
 }
 
@@ -208,11 +211,13 @@ async function passResearch(map) {
   const angles = ['how similar open-source systems solve this', 'academic/industry patterns and their tradeoffs', 'data sources and APIs that could power it', 'failure stories and anti-patterns from practitioners']
   let all = []
   let dry = 0
+  let researcherLived = false // did ANY researcher ever return a living result? (a live {candidates:[]} counts; a null death does not)
   for (let round = 1; round <= DIAL.roundCap; round++) {
     const found = await pool(Array.from({ length: DIAL.researchers }, (_, i) => () =>
       run(`${PRE}
 You are researcher ${i + 1}, round ${round}. Your angle: ${angles[i % angles.length]}. Search the web and read real sources. The system already has (do NOT propose): ${JSON.stringify(map.components.map(c => c.name))}. Already found this run (do NOT repeat): ${JSON.stringify(all.map(c => c.name))}. Return candidate features with function, rationale, source_quality (high=peer-reviewed/production-validated, medium=widely-used pattern, low=blog-grade), sources.`,
         { label: `researcher-${i + 1}-r${round}`, phase: 'Pass 1 - Research', schema: S_CAND })), `Pass 1 researchers round ${round}`, { min: 1, critical: false })
+    if (found.length) researcherLived = true // pool() already dropped the dead ones; a survivor means research really ran
     const roundCands = found.flatMap(f => f.candidates)
     const judged = await call(`${PRE}
 You are the round judge (cheap dedup - NOT a generator). Existing list: ${JSON.stringify(all)}. New this round: ${JSON.stringify(roundCands)}. new_candidates MUST be a subset of items literally present in "New this round" above - NEVER invent, rename, or synthesize a candidate that is not already in that list, even if the list is empty and even if you can think of a good idea yourself. Return new_candidates = only the genuinely-new (vs Existing list) items from that subset (semantic dedup, drop off-topic), and dry = true iff new_candidates is empty. If "New this round" is empty, new_candidates MUST be [] and dry MUST be true - no exceptions.`,
@@ -221,6 +226,10 @@ You are the round judge (cheap dedup - NOT a generator). Existing list: ${JSON.s
     else { dry = 0; all = all.concat(judged.new_candidates) }
     if (!gate(1)) break
   }
+  // Systemic-guard floor for the candidate-generating pool: if EVERY researcher across EVERY round
+  // died (never a live result), that is a transient API wipeout, not an honest empty run - halt loud.
+  // (A genuine "researched, found nothing" leaves researcherLived=true and completes honestly.)
+  if (!researcherLived) failed.push('Pass 1 researchers (every round wiped by transient API errors - no research ran)')
   all = all.map((c, i) => ({ ...c, id: `c${i + 1}` }))
   RUNSTATE.counts.candidates = all.length
   await synth('Pass 1', 'pass-1-candidates.md', `Full unfiltered candidate list with function/rationale/source-quality/sources. JSON: ${JSON.stringify(all)}`, 'Pass 1 - Research')
@@ -328,7 +337,7 @@ async function passPlan(map, survivors) {
   const ranked = [...survivors].sort((x, y) => x.demerits - y.demerits)
   const chosen = ranked.slice(0, P4CAP)
   const backlog = ranked.slice(P4CAP)
-  if (backlog.length) await synth('Pass 4', 'build-next.md', `Ranked backlog of survivors beyond the top-${P4CAP} build cap (never deleted; promotable by the human next run). JSON: ${JSON.stringify(backlog)}`, 'Pass 4 - Plan')
+  if (backlog.length) await synth('Pass 4', 'build-next.md', `Ranked backlog of survivors beyond the top-${P4CAP} build cap (never deleted; promotable by the human next run). JSON: ${JSON.stringify(backlog)}`, 'Pass 4 - Plan', true)
   const STANCES = ['minimal-diff', 'robustness-first', 'extensibility-first'].slice(0, DIAL.rivals)
   let rivals, planComplexity = 'low' // L1 signal for the tournament judge: wider approach space -> harder judge
   if (DIAL.rivals > 1) {
@@ -361,7 +370,7 @@ Coherence check on the merged plan: contradictions between sections, grafted ite
     }
   }
   await synth('Pass 4', 'final-plan.md', `The build spec Pass 5 reads. Render all 8 sections in order, then a "Feature Probes" section listing every feature's probe verbatim, then (if a tournament ran) "Tournament notes": scores table, grounded_findings, graft decisions, losing-plan one-line summaries. plan=${JSON.stringify(final)} judge=${JSON.stringify(judge)}`, 'Pass 4 - Plan')
-  if (A.run_style === 'planonly') await synth('Pass 4', 'EXECUTE.md', `Separate-session kickoff per references/kickoff-prompt.md template: run name ${A.name}, absolute plan path ${A.run_dir}/final-plan.md, activation summary from the plan's Feature Activation Plan section, and the one-line resume trigger "discover: build ${A.name}".`, 'Pass 4 - Plan')
+  if (A.run_style === 'planonly') await synth('Pass 4', 'EXECUTE.md', `Separate-session kickoff per references/kickoff-prompt.md template: run name ${A.name}, absolute plan path ${A.run_dir}/final-plan.md, activation summary from the plan's Feature Activation Plan section, and the one-line resume trigger "discover: build ${A.name}".`, 'Pass 4 - Plan', true)
   return { plan_path: `${A.run_dir}/final-plan.md` }
 }
 phase('Bootstrap')
@@ -389,8 +398,10 @@ try {
     map = { fromDisk: true, raw: priorMap, components: [], data_sources: [], gaps: [], unverified: [] }
     const reparse = await call(`${PRE}\nParse this saved system-map artifact back into structured form:\n${priorMap}`, { label: 'reparse-map', phase: 'Bootstrap', schema: S_MAP })
     if (reparse) map = reparse
-    const refilter = await call(`${PRE}\nParse the saved pass-2 artifact back into {kept, drops} structured form. HUMAN CHECKPOINT EDITS OVERRIDE the artifact - apply them (drop = remove from kept; note rewordings): edits=${JSON.stringify(boot.user_edits)}\nARTIFACT:\n${boot.artifacts.filtered}`, { label: 'reparse-filtered', phase: 'Bootstrap', schema: S_FILTER })
-    filtered = refilter || { kept: [], drops: [] }
+    if (A.from_pass <= 3) { // filtered.kept only feeds passKill (from_pass<=3); a from_pass:4 resume never uses it, so don't halt on its reparse
+      const refilter = await call(`${PRE}\nParse the saved pass-2 artifact back into {kept, drops} structured form. HUMAN CHECKPOINT EDITS OVERRIDE the artifact - apply them (drop = remove from kept; note rewordings): edits=${JSON.stringify(boot.user_edits)}\nARTIFACT:\n${boot.artifacts.filtered}`, { label: 'reparse-filtered', phase: 'Bootstrap', schema: S_FILTER })
+      filtered = refilter || { kept: [], drops: [] }
+    }
     if (failed.length) return partialReturn(completed, deathMsg())
   }
   let survivors = null

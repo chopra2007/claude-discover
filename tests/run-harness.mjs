@@ -72,7 +72,8 @@ await runCase('partial-mapper-loss-continues', hf,
   r => !r.ok ? 'a partial pool loss (1 of 2 mappers) should still complete: ' + r.summary : '',
   l => l === 'mapper-1' ? null : canned(l))
 await runCase('filter-death-halts', hf,
-  r => r.ok ? 'must NOT be ok when filter-analyst died' : r.completed_passes.includes(2) ? 'Pass 2 must not be marked complete' : '',
+  r => r.ok ? 'must NOT be ok when filter-analyst died' : r.completed_passes.includes(2) ? 'Pass 2 must not be marked complete'
+    : !/filter-analyst/.test(r.summary) ? 'death message must name the dead seat (distinguishes the clean halt from a raw crash)' : '',
   l => l === 'filter-analyst' ? null : canned(l))
 await runCase('kill-judge-death-halts', hf,
   r => r.ok ? 'must NOT be ok when the kill-test judge died' : r.completed_passes.includes(3) ? 'Pass 3 must not be marked complete' : '',
@@ -107,3 +108,37 @@ await runCase('models-max-reaches-fable', { ...std, model_tier: 'max' }, (r, cal
 await runCase('models-pins-override-both-judges', { ...std, pins: { judge: 'fable:max', 'plan-judge': 'opus:high' } }, (r, calls, seats) => expectSeats(seats, {
   'judge': 'fable:max', 'tournament-judge': 'opus:high', // L3 pin (plan-judge alias) beats the preset/auto
 }))
+await runCase('models-balanced-complex-tournament-reaches-fable', { ...std }, (r, calls, seats) => expectSeats(seats, {
+  'tournament-judge': 'fable:high', // balanced + wide approach space (distinct=4 -> 'max' signal) -> Fable.high
+}), l => l === 'approach-enum' ? { distinct_architectures: 4, notes: '' } : canned(l))
+
+// --- review fixes: total-wipeout floor on the candidate pool (F1), primary-synth hand-off (F2),
+//     and the coverage gaps the reviewer named (skeptic/planner wipeout, tournament-judge death, resume path) ---
+await runCase('research-wipeout-halts', hf, // F1: every researcher dies every round -> halt, not a false "complete, 0 candidates"
+  r => r.ok ? 'must NOT be ok when every researcher died (would be a silent empty run)' : r.completed_passes.includes(1) ? 'Pass 1 must not be marked complete' : '',
+  l => l.startsWith('researcher') ? null : canned(l))
+await runCase('primary-synth-death-halts', hf, // F2: a pass hand-off artifact failing to write must halt (later bursts read it from disk)
+  r => r.ok ? 'must NOT be ok when a primary synth (pass-2-filtered) failed to write' : r.completed_passes.includes(2) ? 'Pass 2 must not be marked complete with no artifact' : '',
+  l => l === 'synth:pass-2-filtered.md' ? null : canned(l))
+await runCase('aux-synth-death-still-completes', std, // build-next.md is auxiliary -> its death must NOT halt
+  r => !r.ok ? 'an auxiliary synth (build-next) death should not halt the run: ' + r.summary : '',
+  l => l === 'synth:build-next.md' ? null : canned(l))
+await runCase('skeptic-wipeout-halts', hf,
+  r => r.ok ? 'must NOT be ok when the whole skeptic panel died' : r.completed_passes.includes(3) ? 'Pass 3 must not be marked complete' : '',
+  l => l.startsWith('skeptic') ? null : canned(l))
+await runCase('planner-wipeout-halts', std,
+  r => r.ok ? 'must NOT be ok when all planners died' : r.completed_passes.includes(4) ? 'Pass 4 must not be marked complete' : '',
+  l => l.startsWith('plan:') ? null : canned(l))
+await runCase('tournament-judge-death-halts', std,
+  r => r.ok ? 'must NOT be ok when the tournament judge died' : r.completed_passes.includes(4) ? 'Pass 4 must not be marked complete' : '',
+  l => l === 'tournament-judge' ? null : canned(l))
+// resume/reparse death path: a from_pass:4 resume with saved artifacts whose kill-report reparse dies must halt
+const savedBoot = l => l === 'bootstrap'
+  ? { found: true, artifacts: { map: 'M', candidates: '', filtered: 'F', kill_report: 'K', drops: '', outcomes_prior: '' }, user_edits: '' }
+  : l === 'reparse-kill' ? null : canned(l)
+await runCase('reparse-kill-death-halts', { ...base, dial: 'standard', from_pass: 4, to_pass: 4 },
+  r => r.ok ? 'must NOT be ok when reparse-kill died on a resume' : !r.partial ? 'must be partial' : '', savedBoot)
+await runCase('reparse-filtered-death-irrelevant-on-frompass4', { ...base, dial: 'standard', from_pass: 4, to_pass: 4 }, // F3: filtered is unused at from_pass 4, so its reparse is skipped and cannot halt
+  r => !r.ok ? 'a from_pass:4 resume must not halt on reparse-filtered (never consumed): ' + r.summary : '',
+  l => l === 'bootstrap' ? { found: true, artifacts: { map: 'M', candidates: '', filtered: 'F', kill_report: 'K', drops: '', outcomes_prior: '' }, user_edits: '' }
+     : l === 'reparse-filtered' ? null : canned(l))
