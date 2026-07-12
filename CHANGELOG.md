@@ -4,6 +4,24 @@ All notable changes to the **discover** plugin are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the project
 uses [semantic versioning](https://semver.org/).
 
+## [1.3.0] — 2026-07-12
+
+### Added
+- **Reusable codebase map.** A run no longer re-reads the whole repo every time. The last full scan
+  is saved per repo at `.claude/discover/_map/` (the map plus the git commit it was built from). On
+  the next run: nothing changed → the saved map is reused verbatim with **zero** mapper agents; a few
+  files changed → **one** delta mapper re-reads only those files and patches the saved map; map
+  missing, more than 100 files changed, or git state unknown → full re-scan exactly as before. The
+  cache is only rolled forward on a full scan, so patch errors can never compound run over run.
+  Measured motivation: the map phase ate ~23–50% of real runs' tokens on a repo that barely changed.
+- **`remap=fresh` / `remap=reuse` override.** Typed inline like `budget=N`: `fresh` forces a full
+  re-scan; `reuse` forces the saved map even if the repo changed. Default is the auto behavior above.
+
+### Fixed
+- **Same-run restarts re-paid the map.** A restarted burst now reparses the run's own already-saved
+  `pass-0-system-map.md` from disk instead of re-running the mapper fan-out (one July run rebuilt its
+  map three times across restarts — ~50% of its total spend).
+
 ## [1.2.0] — 2026-07-07
 
 ### Added
@@ -57,5 +75,6 @@ The original tmux-based skill that composed OMC + superpowers across multi-agent
 gained a verification-before-completion gate in Pass 5, a non-tmux native parallel-agent option, and
 a one-line kickoff prompt. Superseded by 1.1.0.
 
+[1.3.0]: https://github.com/chopra2007/claude-discover/releases/tag/v1.3.0
 [1.2.0]: https://github.com/chopra2007/claude-discover/releases/tag/v1.2.0
 [1.1.0]: https://github.com/chopra2007/claude-discover/releases/tag/v1.1.0

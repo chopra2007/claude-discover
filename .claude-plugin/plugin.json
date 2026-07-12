@@ -1,6 +1,6 @@
 {
   "name": "discover",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Methodical 5-pass feature-discovery workflow on Claude Code's built-in Workflow engine: system mapping, bounded research, evidence-rule kill-testing, plan tournament, verified execution. No required dependencies; OMC/superpowers/Codex/Gemini are optional boosters.",
   "author": {
     "name": "chopra2007"

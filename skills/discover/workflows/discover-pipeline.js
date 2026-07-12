@@ -19,6 +19,7 @@ const DIALS = {
 } // Light validated by a real 0-4 run (2026-07-02): 793,694 output tokens, 21 agents, completed under the 900k breaker. Standard/Deep still extrapolated (~2.8x / ~6.7x Light); refine when a run at those dials exists.
 const DIAL = DIALS[A.dial]
 const P4CAP = 3 // fixed on every dial (spec §5 Pass 4)
+const MAP_DELTA_CAP = 100 // v1.3: more source files changed than this since the cached map -> too stale to patch, full re-scan
 
 const LENSES = [ // order matters: light uses first 2, standard first 3, deep all 5 (spec §5 Pass 3.1)
   { key: 'code-reality',      anchor: 'Read the actual target modules and integration points named in the system map. A kill from this lens must quote file:line proving the hook point does not exist as the idea assumes.' },
@@ -33,10 +34,14 @@ const DROP_CODES = ['already-exists-verified', 'below-cut', 'kill-upheld', 'dry-
 const PLAN_SECTIONS = ['System Overview', 'Component Architecture', 'Data Flow Pipeline', 'Data Structures', 'Integration Plan', 'Failure Handling', 'Feature Activation Plan', 'Verification Checklist']
 
 const S_ACK = { type: 'object', required: ['path', 'summary'], properties: { path: { type: 'string' }, summary: { type: 'string' } } }
-const S_BOOT = { type: 'object', required: ['found', 'artifacts', 'user_edits'], properties: {
+const S_BOOT = { type: 'object', required: ['found', 'artifacts', 'user_edits', 'map_cache', 'map_cache_sha', 'git_diff_ok', 'changed_since_cache'], properties: {
   found: { type: 'boolean' },
   artifacts: { type: 'object', properties: { map: { type: 'string' }, candidates: { type: 'string' }, filtered: { type: 'string' }, kill_report: { type: 'string' }, drops: { type: 'string' }, outcomes_prior: { type: 'string' } }, description: 'full text content of each artifact file that exists, keyed as named' },
-  user_edits: { type: 'string', description: 'verbatim content of checkpoint-edits.md if present, else empty' } } }
+  user_edits: { type: 'string', description: 'verbatim content of checkpoint-edits.md if present, else empty' },
+  map_cache: { type: 'string', description: 'full text of <project_root>/.claude/discover/_map/system-map.md if it exists, else empty' },
+  map_cache_sha: { type: 'string', description: 'the git_sha recorded in _map/meta.json, else empty' },
+  git_diff_ok: { type: 'boolean', description: 'true ONLY if the git diff + status commands both ran cleanly' },
+  changed_since_cache: { type: 'array', items: { type: 'string' }, description: 'deduped file paths changed since map_cache_sha (committed + uncommitted); [] when git_diff_ok is false' } } }
 const CAND = { type: 'object', required: ['id', 'name', 'function', 'rationale', 'source_quality'], properties: {
   id: { type: 'string' }, name: { type: 'string' }, function: { type: 'string' }, rationale: { type: 'string' },
   source_quality: { type: 'string', enum: ['high', 'medium', 'low'] }, sources: { type: 'array', items: { type: 'string' } } } }
@@ -103,7 +108,7 @@ const MED_OPUS = new Set(['advocate', 'architect-merge'])            // opus sea
 const PIN_ALIAS = { 'kill-judge': 'judge', kill_judge: 'judge', 'plan-judge': 'tournament-judge', plan_judge: 'tournament-judge' }
 function baseModel(label) {
   if (/^(bootstrap|reparse-|dry-judge-|synth:|burst-summary)/.test(label)) return 'haiku' // read files / markdown->data / format
-  if (/^(mapper-|researcher-|redundancy:|xmodel:)/.test(label)) return 'sonnet'            // faithful code reads + the big pools
+  if (/^(mapper-|delta-mapper|researcher-|redundancy:|xmodel:)/.test(label)) return 'sonnet' // faithful code reads + the big pools
   return 'opus'                                                                            // reasoning seats (judges resolve dynamically)
 }
 function baseEffort(label) {
@@ -186,15 +191,45 @@ async function bootstrap() {
   return await call(`${PRE}
 You are the burst bootstrap reader. Read the run directory ${A.run_dir} (it may not exist yet - then found=false).
 Return the FULL TEXT of each of these files that exists, in artifacts keyed exactly: map=pass-0-system-map.md, candidates=pass-1-candidates.md, filtered=pass-2-filtered.md, kill_report=pass-3-kill-report.md, drops=drops-log.md. Also key outcomes_prior = concatenated content of outcome.json files from OTHER run dirs under ${A.project_root}/.claude/discover/*/outcome.json (empty string if none).
-user_edits = verbatim content of ${A.run_dir}/checkpoint-edits.md if it exists (the human's checkpoint decisions - these OVERRIDE artifact content), else "".`, { label: 'bootstrap', phase: 'Bootstrap', schema: S_BOOT })
+user_edits = verbatim content of ${A.run_dir}/checkpoint-edits.md if it exists (the human's checkpoint decisions - these OVERRIDE artifact content), else "".
+Also probe the repo-level map cache: map_cache = full text of ${A.project_root}/.claude/discover/_map/system-map.md if it exists else "", and map_cache_sha = the git_sha value inside ${A.project_root}/.claude/discover/_map/meta.json if it exists else "". If BOTH are non-empty, run these two commands: git -C ${A.project_root} diff --name-only <map_cache_sha>..HEAD  and  git -C ${A.project_root} status --porcelain (take only the path column). If both commands succeed, return git_diff_ok=true and changed_since_cache = the deduped union of file paths from both (empty array is a valid result meaning nothing changed). If either command fails, or the cache is missing/incomplete, return git_diff_ok=false and changed_since_cache=[].`, { label: 'bootstrap', phase: 'Bootstrap', schema: S_BOOT })
 }
 
 function partialReturn(completed, why) {
   return { ok: false, partial: true, completed_passes: completed, summary: why + ` Everything finished so far is saved in ${A.run_dir}. Resume with the command below - completed work will not be re-paid.`, artifacts: RUNSTATE.artifacts, counts: RUNSTATE.counts, decisions_needed: RUNSTATE.decisions, resume_command: `discover: ${A.name}` }
 }
-async function passMap() {
+async function passMap(boot) {
   phase('Pass 0 - Map')
   if (A.greenfield) { log('greenfield project - Pass 0 skipped (nothing to map)'); return { components: [], data_sources: [], gaps: ['greenfield - no existing system'], unverified: [] } }
+  // v1.3: reuse the repo-level map cache (written by the last FULL scan) instead of re-reading the
+  // whole repo every run: verbatim when nothing changed, one delta mapper for a small drift, full
+  // fan-out when the cache is missing/too stale/forced (remap=fresh) or the git state is unknown.
+  // The cache is only rolled forward on a full scan, so delta-patch errors can never compound.
+  const cache = A.remap === 'fresh' ? '' : (boot.map_cache || '')
+  const sha7 = (boot.map_cache_sha || '').slice(0, 7)
+  const changed = (boot.changed_since_cache || []).filter(f => f && !/^(\.claude|\.omc|\.git)\//.test(f))
+  if (cache && (A.remap === 'reuse' || (boot.git_diff_ok && changed.length === 0))) {
+    RUNSTATE.map_mode = `reused the saved map (commit ${sha7}) - nothing re-read`
+    log(`Pass 0: ${RUNSTATE.map_mode}`)
+    const merged = await call(`${PRE}
+Copy the saved repo map ${A.project_root}/.claude/discover/_map/system-map.md VERBATIM to ${A.run_dir}/pass-0-system-map.md (create/overwrite), then parse it back into structured form and return that.
+SAVED MAP:
+${cache}`, { label: 'reparse-map-cache', phase: 'Pass 0 - Map', schema: S_MAP })
+    if (merged) RUNSTATE.artifacts.push(`${A.run_dir}/pass-0-system-map.md`)
+    return merged
+  }
+  if (cache && boot.git_diff_ok && changed.length <= MAP_DELTA_CAP) {
+    RUNSTATE.map_mode = `patched the saved map (commit ${sha7}) - re-read only the ${changed.length} changed file(s)`
+    log(`Pass 0: ${RUNSTATE.map_mode}`)
+    const merged = await call(`${PRE}
+You are the delta mapper. A trusted system map of this repo already exists (built at commit ${boot.map_cache_sha}); since then ONLY these files changed: ${JSON.stringify(changed)}. READ those files (and only those), then return the FULL updated map: start from the saved map, patch/add/remove exactly the entries those changes require, keep everything else verbatim. Mark anything you did not actually read as unverified.
+SAVED MAP:
+${cache}`, { label: 'delta-mapper', phase: 'Pass 0 - Map', schema: S_MAP })
+    await synth('Pass 0', 'pass-0-system-map.md', `Component inventory, data sources, gaps (only truly absent things), and an "inferred but not verified" section. JSON to render: ${JSON.stringify(merged)}`, 'Pass 0 - Map')
+    return merged
+  }
+  RUNSTATE.map_mode = cache ? `full re-scan (${A.remap === 'fresh' ? 'fresh map forced' : boot.git_diff_ok ? `${changed.length} files changed - too stale to patch` : 'git state unknown'})` : 'full re-scan (no saved map yet)'
+  log(`Pass 0: ${RUNSTATE.map_mode}`)
   const views = await pool(Array.from({ length: DIAL.mappers }, (_, i) => () =>
     run(`${PRE}
 You are codebase mapper ${i + 1} of ${DIAL.mappers}. Divide the repo mentally into ${DIAL.mappers} slices by top-level directory order and take slice ${i + 1}. READ the actual source files in your slice (entrypoints, core modules, config). Mark anything you did not actually read as unverified.`,
@@ -203,6 +238,8 @@ You are codebase mapper ${i + 1} of ${DIAL.mappers}. Divide the repo mentally in
 You are the architect. Merge these mapper inventories into ONE faithful system map (dedupe, resolve conflicts by re-reading the disputed file yourself). Keep the unverified list honest.
 MAPPER OUTPUTS: ${JSON.stringify(views)}`, { label: 'architect-merge', phase: 'Pass 0 - Map', schema: S_MAP })
   await synth('Pass 0', 'pass-0-system-map.md', `Component inventory, data sources, gaps (only truly absent things), and an "inferred but not verified" section. JSON to render: ${JSON.stringify(merged)}`, 'Pass 0 - Map')
+  await call(`${PRE}
+Save the repo-level map cache so future runs can skip the full re-scan: copy ${A.run_dir}/pass-0-system-map.md VERBATIM to ${A.project_root}/.claude/discover/_map/system-map.md (create the directory if needed), then write ${A.project_root}/.claude/discover/_map/meta.json as JSON: {"git_sha": <output of: git -C ${A.project_root} rev-parse HEAD - or "" if that fails>, "built_at": <current UTC ISO timestamp>, "dial": "${A.dial}"}. Return {path, summary}.`, { label: 'synth:map-cache', phase: 'Pass 0 - Map', schema: S_ACK, optional: true })
   return merged
 }
 
@@ -383,7 +420,13 @@ try {
   if (A.from_pass > 0 && !boot.found) return partialReturn([], `Cannot start at pass ${A.from_pass}: no saved artifacts found in ${A.run_dir}.`)
   if (A.from_pass === 0) {
     if (!gate(0)) return partialReturn(completed, 'Budget too low for Pass 0.')
-    map = await passMap()
+    if (priorMap && A.remap !== 'fresh') {
+      // v1.3: same-run restart - an earlier attempt already saved this run's map to disk; reparse it
+      // instead of re-paying the mapper fan-out (one Jul-2026 run rebuilt its map 3x without this).
+      RUNSTATE.map_mode = "reused this run's own saved map (restart)"
+      log(`Pass 0: ${RUNSTATE.map_mode}`)
+      map = await call(`${PRE}\nParse this saved system-map artifact back into structured form:\n${priorMap}`, { label: 'reparse-map', phase: 'Bootstrap', schema: S_MAP })
+    } else map = await passMap(boot)
     if (failed.length) return partialReturn(completed, deathMsg())
     completed.push(0)
     if (!gate(1)) return partialReturn(completed, 'Budget exhausted after Pass 0.')
@@ -426,5 +469,5 @@ try {
   return partialReturn(completed, `A stage failed hard (${String(e).slice(0, 200)}).`)
 }
 if (failed.length) return partialReturn(completed, deathMsg())
-const summary = await call(`${PRE}\nWrite a 3-6 sentence plain-language summary of this burst for a non-coder: passes completed ${JSON.stringify(completed)}, counts ${JSON.stringify(RUNSTATE.counts)}, decisions needed ${JSON.stringify(RUNSTATE.decisions)}. Name the artifact files to look at. No jargon.`, { label: 'burst-summary', phase: completed.includes(4) ? 'Pass 4 - Plan' : 'Pass 3 - Kill-test', schema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } }, optional: true })
+const summary = await call(`${PRE}\nWrite a 3-6 sentence plain-language summary of this burst for a non-coder: passes completed ${JSON.stringify(completed)}, codebase-map handling: ${RUNSTATE.map_mode || 'not part of this burst'}, counts ${JSON.stringify(RUNSTATE.counts)}, decisions needed ${JSON.stringify(RUNSTATE.decisions)}. Name the artifact files to look at. No jargon.`, { label: 'burst-summary', phase: completed.includes(4) ? 'Pass 4 - Plan' : 'Pass 3 - Kill-test', schema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } }, optional: true })
 return { ok: true, partial: false, completed_passes: completed, summary: summary ? summary.text : 'burst complete', artifacts: RUNSTATE.artifacts, counts: RUNSTATE.counts, decisions_needed: RUNSTATE.decisions, resume_command: '' }

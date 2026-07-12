@@ -26,7 +26,11 @@ If none of those four triggers is in the message, this skill does NOT activate �
 Additional sub-triggers: `discover: recheck` (force capability rescan) · `discover: build <name>`
 (build a saved plan) · `discover: <name> budget=N` (power-user token cap override) ·
 `discover: <name> tier=quick|balanced|max` (model-strength ceiling) · `discover: <name> judge=fable:max`
-or `plan-judge=opus:high` (power-user per-seat pin on a judge → `pins`).
+or `plan-judge=opus:high` (power-user per-seat pin on a judge → `pins`) · `discover: <name> remap=fresh`
+(force a full codebase re-scan, ignoring the saved map) or `remap=reuse` (force reusing the saved map
+even if the repo changed) → `remap`. By default the run auto-decides: it reuses the map saved by the
+last full scan when nothing changed, re-reads only the changed files when a few did, and does a full
+re-scan only when the map is missing or the repo drifted a lot (>100 changed files).
 
 ## Startup sequence — in order, before ANY work
 
@@ -110,7 +114,9 @@ feature_ask (user's words), dial, run_style, from_pass, to_pass, greenfield, cap
 (from steps 2–3: {omc, superpowers, codex: healthy|broken|absent, gemini: ...}),
 budget_override (from `budget=N` or null), free_data_only (true unless the user allowed paid),
 model_tier (`quick|balanced|max` from the Model-tier answer, default `balanced`), pins (object of
-per-seat judge pins from the fine-override or a typed `judge=…`/`plan-judge=…`, else `{}`).
+per-seat judge pins from the fine-override or a typed `judge=…`/`plan-judge=…`, else `{}`),
+remap (`fresh`|`reuse` from a typed `remap=…`, else null = auto map reuse — see the sub-triggers
+note; the saved map lives at `<project_root>/.claude/discover/_map/`).
 
 - Hands-off / Plan-only: ONE burst `from_pass: 0, to_pass: 4`.
 - Checkpoints: burst `0→2`; **shortlist review** (present the kept list; offer which to drop as a

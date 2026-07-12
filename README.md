@@ -32,7 +32,7 @@ never loses work.
 
 | Pass | What happens |
 |------|--------------|
-| **0 — Map** | Parallel mappers read the actual source; an architect merges it into one faithful system map (skipped on a brand-new project). |
+| **0 — Map** | Parallel mappers read the actual source; an architect merges it into one faithful system map (skipped on a brand-new project). The map is saved per repo: later runs reuse it as-is when nothing changed, or re-read only the files that changed since. |
 | **1 — Research** | Researchers search real sources for candidate features, in bounded rounds that stop when a round turns up nothing new. |
 | **2 — Filter** | Candidates are ranked; anything claimed to "already exist" is independently checked against real code before it's dropped. |
 | **3 — Kill-test** | A panel of skeptics tries to disprove each idea. An idea dies only on proven, checked evidence — never a vote. |
@@ -79,6 +79,10 @@ Extra sub-commands:
 - `discover: <name> budget=N` — power-user cap on how many Claude tokens the run may spend.
 - `discover: <name> tier=quick|balanced|max` — set the model-strength ceiling inline.
 - `discover: <name> judge=fable:max` (or `plan-judge=opus:high`) — power-user pin on a judge step.
+- `discover: <name> remap=fresh` — force a full codebase re-scan, ignoring the saved map;
+  `remap=reuse` — force reusing the saved map even if the repo changed. Default: automatic — reuse
+  the saved map when nothing changed, re-read only the changed files when a few did, full re-scan
+  when the map is missing or the repo drifted a lot.
 
 It will NOT activate on plain "add a feature", "build me X", or "improve my system" — the trigger
 is intentionally narrow.

@@ -6,8 +6,8 @@ const body = src.replace(/export const meta[\s\S]*?\n}\n/, '')
 const AsyncFn = Object.getPrototypeOf(async function () {}).constructor
 
 const canned = label =>
-  label === 'bootstrap' ? { found: false, artifacts: {}, user_edits: '' } :
-  label.startsWith('mapper') || label === 'architect-merge' ? { components: [{ name: 'core', path: 'src/core.py', does: 'x' }], data_sources: [], gaps: [], unverified: [] } :
+  label === 'bootstrap' ? { found: false, artifacts: {}, user_edits: '', map_cache: '', map_cache_sha: '', git_diff_ok: false, changed_since_cache: [] } :
+  label.startsWith('mapper') || label === 'architect-merge' || label === 'delta-mapper' ? { components: [{ name: 'core', path: 'src/core.py', does: 'x' }], data_sources: [], gaps: [], unverified: [] } :
   label.startsWith('researcher') ? { candidates: [{ id: '', name: 'F-' + label, function: 'f', rationale: 'r', source_quality: 'medium', sources: [] }] } :
   label.startsWith('dry-judge') ? { new_candidates: [], dry: true } :
   label === 'filter-analyst' ? { kept: [{ id: 'c1', name: 'F1', rank: 1, failure_modes: [], safeguards: [], prior_outcome: '' }], drops: [{ id: 'c2', name: 'F2', code: 'already-exists-verified', reason: 'map says so', evidence: '' }] } :
@@ -142,3 +142,49 @@ await runCase('reparse-filtered-death-irrelevant-on-frompass4', { ...base, dial:
   r => !r.ok ? 'a from_pass:4 resume must not halt on reparse-filtered (never consumed): ' + r.summary : '',
   l => l === 'bootstrap' ? { found: true, artifacts: { map: 'M', candidates: '', filtered: 'F', kill_report: 'K', drops: '', outcomes_prior: '' }, user_edits: '' }
      : l === 'reparse-filtered' ? null : canned(l))
+
+// --- v1.3 reusable codebase map: reuse the repo-level cache verbatim when nothing changed, patch it
+//     with ONE delta mapper on a small drift, full fan-out when missing/stale/forced, and never
+//     re-run mappers on a same-run restart whose map is already on disk ---
+const cachedBoot = changed => l => l === 'bootstrap'
+  ? { found: false, artifacts: {}, user_edits: '', map_cache: '# saved map', map_cache_sha: 'abc1234def', git_diff_ok: true, changed_since_cache: changed }
+  : canned(l)
+await runCase('map-cache-no-diff-reuses-verbatim', hf,
+  (r, calls) => !r.ok ? 'not ok: ' + r.summary
+    : calls.some(c => c.startsWith('mapper-') || c === 'architect-merge' || c === 'delta-mapper') ? 'must not re-read the repo when nothing changed'
+    : !calls.includes('reparse-map-cache') ? 'cached map must be reparsed'
+    : !r.completed_passes.includes(0) ? 'Pass 0 must still count as complete' : '',
+  cachedBoot([]))
+await runCase('map-cache-small-diff-runs-one-delta-mapper', hf,
+  (r, calls, seats) => !r.ok ? 'not ok: ' + r.summary
+    : calls.filter(c => c === 'delta-mapper').length !== 1 ? 'exactly one delta-mapper must run'
+    : calls.some(c => c.startsWith('mapper-') || c === 'architect-merge') ? 'full mappers must not run on a small diff'
+    : !calls.includes('synth:pass-0-system-map.md') ? 'patched map must still be written to the run dir'
+    : seats['delta-mapper'] !== 'sonnet:low' ? 'delta-mapper should resolve to sonnet:low, got ' + seats['delta-mapper'] : '',
+  cachedBoot(['src/a.py', 'src/b.py']))
+await runCase('map-cache-huge-diff-full-rescan', hf,
+  (r, calls) => !r.ok ? 'not ok: ' + r.summary
+    : !calls.some(c => c.startsWith('mapper-')) ? 'a too-stale cache must trigger the full fan-out'
+    : calls.includes('delta-mapper') ? 'delta path must not run past the staleness cap' : '',
+  cachedBoot(Array.from({ length: 101 }, (_, i) => `src/f${i}.py`)))
+await runCase('map-cache-noise-paths-ignored', hf, // only .claude/.omc/.git churn since the cache -> still counts as "nothing changed"
+  (r, calls) => calls.some(c => c.startsWith('mapper-') || c === 'delta-mapper') ? 'artifact-dir churn must not defeat the cache' : '',
+  cachedBoot(['.claude/discover/old-run/state.json', '.omc/notepad.md']))
+await runCase('no-cache-full-rescan-writes-cache', hf,
+  (r, calls) => !r.ok ? 'not ok: ' + r.summary
+    : !calls.some(c => c.startsWith('mapper-')) ? 'no cache must run the full fan-out'
+    : !calls.includes('synth:map-cache') ? 'a full scan must write the repo-level map cache' : '')
+await runCase('remap-fresh-forces-full-rescan', { ...hf, remap: 'fresh' },
+  (r, calls) => !calls.some(c => c.startsWith('mapper-')) ? 'remap=fresh must run the full fan-out'
+    : calls.includes('delta-mapper') || calls.includes('reparse-map-cache') ? 'remap=fresh must ignore the cache' : '',
+  cachedBoot([]))
+await runCase('remap-reuse-forces-cache-despite-diff', { ...hf, remap: 'reuse' },
+  (r, calls) => !calls.includes('reparse-map-cache') ? 'remap=reuse must reuse the cache'
+    : calls.some(c => c.startsWith('mapper-') || c === 'delta-mapper') ? 'no mappers may run on a forced reuse' : '',
+  cachedBoot(Array.from({ length: 300 }, (_, i) => `src/f${i}.py`)))
+await runCase('same-run-restart-reuses-own-map', hf,
+  (r, calls) => !r.ok ? 'not ok: ' + r.summary
+    : calls.some(c => c.startsWith('mapper-') || c === 'delta-mapper' || c === 'architect-merge') ? 'a restart with the map already on disk must not re-run mappers'
+    : !calls.includes('reparse-map') ? 'must reparse the run-dir map'
+    : !r.completed_passes.includes(0) ? 'Pass 0 must count as complete' : '',
+  l => l === 'bootstrap' ? { found: true, artifacts: { map: '# this run map', candidates: '', filtered: '', kill_report: '', drops: '', outcomes_prior: '' }, user_edits: '', map_cache: '', map_cache_sha: '', git_diff_ok: false, changed_since_cache: [] } : canned(l))
